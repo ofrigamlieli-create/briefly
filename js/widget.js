@@ -9,6 +9,9 @@
   let currentTab = 'short';
   let currentSize = 'medium';
   let currentCustomSize = {w:320, h:230};
+  let currentMode = null; // null | 'tldr' | 'terms' | 'diagram'
+  let currentAnalysisText = null;
+  let storedSelectionText = '';
   let isRegenerating = false;
   let selectionRect = null;
   let tldrCache = null;
@@ -18,6 +21,8 @@
   let tldrHostEl = null;
   let tldrShadow = null;
   let expandOverlayContainer = null;
+  let expandOverlayItems = []; // { overlay, el } for scroll repositioning
+  let expandScrollHandler = null;
 
   // ── Storage helpers ──────────────────────────────────────────
 
@@ -170,33 +175,50 @@
     return `<p>${tldrCache[tab]}</p>`;
   }
 
-  function expandedHTML(tab) {
+  const ICON_TLDR    = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="15" y2="18"/></svg>`;
+  const ICON_TERMS   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`;
+  const ICON_DIAGRAM = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
+  const ICON_REGEN   = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 .49-5.93"/></svg>`;
+  const ICON_SAVE    = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>`;
+  const ICON_SETTINGS = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2.5" fill="currentColor" stroke="none"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2.5" fill="currentColor" stroke="none"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.5" fill="currentColor" stroke="none"/></svg>`;
+
+  function widgetHTML(mode, tab) {
+    const tldrActive    = mode === 'tldr';
+    const termsActive   = mode === 'terms';
+    const diagramActive = mode === 'diagram';
+
+    const bodyHTML = tldrActive
+      ? contentHTML(tab)
+      : termsActive
+        ? '<p class="kani-placeholder">Terms Explorer — coming soon</p>'
+        : diagramActive
+          ? '<p class="kani-placeholder">Visual Explainer — coming soon</p>'
+          : '<p class="kani-placeholder">Choose an analysis above</p>';
+
     return `
-      <div class="kani-widget" role="dialog" aria-label="Kani TLDR">
+      <div class="kani-widget" role="dialog" aria-label="Kani">
         <div class="kani-header">
           <div class="kani-header-brand">
             <span class="kani-logo">Kani</span>
             <span class="kani-kanji">肝</span>
-            <span class="kani-tagline">The essential point</span>
           </div>
           <button class="kani-close-btn" id="kani-close-btn" aria-label="Close">×</button>
         </div>
-        <div class="kani-tabs">
+        <div class="kani-modes">
+          <button class="kani-mode-btn ${tldrActive ? 'active' : ''}" id="kani-mode-tldr" aria-label="TLDR">${ICON_TLDR}</button>
+          <button class="kani-mode-btn ${termsActive ? 'active' : ''}" id="kani-mode-terms" aria-label="Terms">${ICON_TERMS}</button>
+          <button class="kani-mode-btn ${diagramActive ? 'active' : ''}" id="kani-mode-diagram" aria-label="Diagram">${ICON_DIAGRAM}</button>
+        </div>
+        <div class="kani-tabs" id="kani-subtabs" style="${tldrActive ? '' : 'display:none'}">
           <div class="kani-tab ${tab === 'short' ? 'active' : ''}" data-tab="short">Short</div>
           <div class="kani-tab ${tab === 'bullets' ? 'active' : ''}" data-tab="bullets">Bullets</div>
           <div class="kani-tab ${tab === 'simple' ? 'active' : ''}" data-tab="simple">Simple</div>
         </div>
-        <div class="kani-content" id="kani-content">${contentHTML(tab)}</div>
-        <div class="kani-footer">
-          <button class="kani-icon-btn" id="kani-regen-btn" aria-label="Regenerate">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 .49-5.93"/></svg>
-          </button>
-          <button class="kani-icon-btn" id="kani-save-btn" aria-label="Save">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
-          </button>
-          <button class="kani-icon-btn" id="kani-settings-btn" aria-label="Settings">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="9" cy="6" r="2.5" fill="currentColor" stroke="none"/><line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2.5" fill="currentColor" stroke="none"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.5" fill="currentColor" stroke="none"/></svg>
-          </button>
+        <div class="kani-content" id="kani-content">${bodyHTML}</div>
+        <div class="kani-footer" id="kani-footer" style="${tldrActive ? '' : 'display:none'}">
+          <button class="kani-icon-btn" id="kani-regen-btn" aria-label="Regenerate">${ICON_REGEN}</button>
+          <button class="kani-icon-btn" id="kani-save-btn" aria-label="Save">${ICON_SAVE}</button>
+          <button class="kani-icon-btn" id="kani-settings-btn" aria-label="Settings">${ICON_SETTINGS}</button>
         </div>
         <div class="kani-resize-handle" id="kani-resize-handle"></div>
       </div>
@@ -323,10 +345,9 @@
     const content = tldrShadow.getElementById('kani-content');
     if (btn) btn.disabled = true;
     if (content) content.innerHTML = '<span class="kani-spinner"></span>';
-    requestTldr();
+    requestTldr(currentAnalysisText);
   }
 
-  const SAVE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>`;
   const CHECK_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   function saveTldr() {
@@ -339,7 +360,7 @@
     saveBtn.innerHTML = CHECK_ICON;
     saveBtn.style.color = '#3d9da6';
     setTimeout(() => {
-      saveBtn.innerHTML = SAVE_ICON;
+      saveBtn.innerHTML = ICON_SAVE;
       saveBtn.style.color = '';
     }, 1500);
   }
@@ -406,40 +427,169 @@
       expandOverlayContainer.remove();
       expandOverlayContainer = null;
     }
+    expandOverlayItems = [];
+    if (expandScrollHandler) {
+      window.removeEventListener('scroll', expandScrollHandler, true);
+      expandScrollHandler = null;
+    }
   }
 
-  function createExpandOverlay(rect, isZone, onClick) {
+  function updateExpandOverlayPositions() {
+    expandOverlayItems.forEach(({ overlay, getBounds }) => {
+      const r = getBounds();
+      if (!r || r.height === 0) return;
+      overlay.style.top    = r.top    + 'px';
+      overlay.style.left   = r.left   + 'px';
+      overlay.style.width  = r.width  + 'px';
+      overlay.style.height = r.height + 'px';
+    });
+  }
+
+  function findScrollableContainer(el) {
+    let node = el.parentElement;
+    while (node && node !== document.documentElement) {
+      const s = getComputedStyle(node);
+      if (/auto|scroll/.test(s.overflowY) || /auto|scroll/.test(s.overflow)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function getUnionRect(rectList) {
+    const rects = Array.from(rectList).filter(r => r.width > 0 && r.height > 0);
+    if (!rects.length) return null;
+    const top    = Math.min(...rects.map(r => r.top));
+    const left   = Math.min(...rects.map(r => r.left));
+    const bottom = Math.max(...rects.map(r => r.bottom));
+    const right  = Math.max(...rects.map(r => r.right));
+    return { top, left, width: right - left, height: bottom - top };
+  }
+
+  // Split a leaf element into paragraph chunks at <br><br> boundaries.
+  // Returns [{text, range}] or null if no double-breaks found.
+  function splitByDoubleBreaks(leafEl) {
+    const brs = Array.from(leafEl.querySelectorAll('br'));
+    const boundaries = [];
+    for (let i = 0; i < brs.length - 1; i++) {
+      let node = brs[i].nextSibling;
+      while (node && node !== brs[i + 1] && node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) {
+        node = node.nextSibling;
+      }
+      if (node === brs[i + 1]) { boundaries.push([brs[i], brs[i + 1]]); i++; }
+    }
+    if (!boundaries.length) return null;
+
+    const MIN = 3;
+    const chunks = [];
+    const tryAdd = (makeRange) => {
+      try {
+        const r = makeRange();
+        const text = r.toString().trim();
+        if (text.split(/\s+/).length >= MIN) chunks.push({ text, range: r });
+      } catch (_) {}
+    };
+
+    tryAdd(() => {
+      const r = document.createRange();
+      r.setStart(leafEl, 0); r.setEndBefore(boundaries[0][0]); return r;
+    });
+    for (let i = 0; i < boundaries.length - 1; i++) {
+      tryAdd(() => {
+        const r = document.createRange();
+        r.setStartAfter(boundaries[i][1]); r.setEndBefore(boundaries[i + 1][0]); return r;
+      });
+    }
+    tryAdd(() => {
+      const r = document.createRange();
+      r.setStartAfter(boundaries[boundaries.length - 1][1]);
+      r.setEnd(leafEl, leafEl.childNodes.length); return r;
+    });
+
+    return chunks.length >= 2 ? chunks : null;
+  }
+
+  // Returns [{el?, range?, text, getBounds}]
+  function findParagraphs(zoneEl) {
+    const MIN = 3;
+    const hasWords = (el) => (el.innerText || el.textContent || '').trim().split(/\s+/).length >= MIN;
+
+    // 1. Semantic block elements — treat entire lists as one unit
+    const semantic = Array.from(zoneEl.querySelectorAll('p, ul, ol, blockquote')).filter(hasWords);
+    if (semantic.length >= 2) {
+      return semantic.map(el => ({ el, text: el.innerText || '', getBounds: () => el.getBoundingClientRect() }));
+    }
+
+    // 2. Walk DOM for leaf blocks, then try to split each by <br><br>
+    const BLOCK = new Set(['P','DIV','SECTION','ARTICLE','BLOCKQUOTE','LI','H1','H2','H3','H4','H5','H6']);
+    const leafEls = [];
+    function walk(el, depth) {
+      if (depth > 10 || !hasWords(el)) return;
+      const blockKids = Array.from(el.children).filter(c => BLOCK.has(c.tagName) && hasWords(c));
+      if (blockKids.length === 0) leafEls.push(el);
+      else blockKids.forEach(c => walk(c, depth + 1));
+    }
+    Array.from(zoneEl.children).forEach(c => walk(c, 0));
+    const deduped = leafEls.filter((el, i) => !leafEls.some((o, j) => i !== j && el.contains(o)));
+
+    const result = [];
+    for (const el of deduped) {
+      const brChunks = splitByDoubleBreaks(el);
+      if (brChunks) {
+        brChunks.forEach(({ text, range }) => {
+          result.push({ range, text, getBounds: () => getUnionRect(range.getClientRects()) });
+        });
+      } else {
+        result.push({ el, text: el.innerText || '', getBounds: () => el.getBoundingClientRect() });
+      }
+    }
+    if (result.length >= 1) return result;
+
+    // 3. Fallback: direct children
+    return Array.from(zoneEl.children).filter(hasWords).map(el => ({
+      el, text: el.innerText || '', getBounds: () => el.getBoundingClientRect()
+    }));
+  }
+
+  function createExpandOverlay(rect, isZone, scrollContainer, onClick) {
     const el = document.createElement('div');
-    const scrollX = window.scrollX || window.pageXOffset;
-    const scrollY = window.scrollY || window.pageYOffset;
     el.style.cssText = [
-      'position:absolute',
-      'pointer-events:all',
-      'cursor:pointer',
+      'position:fixed',
       'border-radius:3px',
       'box-sizing:border-box',
       'transition:background 0.12s',
-      `top:${rect.top + scrollY}px`,
-      `left:${rect.left + scrollX}px`,
+      `top:${rect.top}px`,
+      `left:${rect.left}px`,
       `width:${rect.width}px`,
       `height:${rect.height}px`,
       isZone
-        ? 'background:rgba(61,157,166,0.10);border:2px solid rgba(61,157,166,0.35);z-index:2147483640;'
-        : 'background:rgba(61,157,166,0.0);border:1px solid rgba(61,157,166,0.0);z-index:2147483641;'
+        ? 'pointer-events:all;cursor:pointer;background:transparent;border:2px solid rgba(61,157,166,0.45);z-index:2147483640;'
+        : 'pointer-events:all;cursor:pointer;background:rgba(32,120,90,0.22);border:1px solid rgba(32,120,90,0.40);z-index:2147483641;'
     ].join(';');
 
-    if (!isZone) {
+    if (isZone) {
+      el.addEventListener('mouseenter', () => { el.style.borderColor = 'rgba(61,157,166,0.75)'; });
+      el.addEventListener('mouseleave', () => { el.style.borderColor = 'rgba(61,157,166,0.45)'; });
+      el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+    } else {
       el.addEventListener('mouseenter', () => {
-        el.style.background = 'rgba(61,157,166,0.18)';
-        el.style.borderColor = 'rgba(61,157,166,0.5)';
+        el.style.background = 'rgba(32,120,90,0.38)';
+        el.style.borderColor = 'rgba(32,120,90,0.65)';
       });
       el.addEventListener('mouseleave', () => {
-        el.style.background = 'rgba(61,157,166,0.0)';
-        el.style.borderColor = 'rgba(61,157,166,0.0)';
+        el.style.background = 'rgba(32,120,90,0.22)';
+        el.style.borderColor = 'rgba(32,120,90,0.40)';
       });
+      el.addEventListener('wheel', (e) => {
+        if (scrollContainer) {
+          scrollContainer.scrollTop += e.deltaY;
+          scrollContainer.scrollLeft += e.deltaX;
+        } else {
+          window.scrollBy(e.deltaX, e.deltaY);
+        }
+      }, { passive: true });
+      el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     }
 
-    el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     return el;
   }
 
@@ -458,29 +608,35 @@
 
     removeExpandOverlays();
     expandOverlayContainer = document.createElement('div');
-    expandOverlayContainer.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;pointer-events:none;z-index:2147483640;';
+    expandOverlayContainer.style.cssText = 'position:static;pointer-events:none;';
     document.body.appendChild(expandOverlayContainer);
 
+    const scrollContainer = findScrollableContainer(zoneEl);
+
     const zoneRect = zoneEl.getBoundingClientRect();
-    const zoneOverlay = createExpandOverlay(zoneRect, true, () => {
+    const zoneText = zoneEl.innerText || zoneEl.textContent || '';
+    const zoneOverlay = createExpandOverlay(zoneRect, true, scrollContainer, () => {
       removeExpandOverlays();
-      showTldrWithText(zoneEl.innerText || zoneEl.textContent || '');
+      showPicker(zoneText, zoneEl.getBoundingClientRect());
     });
     expandOverlayContainer.appendChild(zoneOverlay);
+    expandOverlayItems.push({ overlay: zoneOverlay, getBounds: () => zoneEl.getBoundingClientRect() });
 
-    const paragraphs = zoneEl.querySelectorAll('p');
-    const targets = paragraphs.length > 0 ? paragraphs : zoneEl.children;
-    Array.from(targets).forEach(para => {
-      const pRect = para.getBoundingClientRect();
-      if (pRect.height === 0 || pRect.width === 0) return;
-      const text = para.innerText || para.textContent || '';
+    const paragraphs = findParagraphs(zoneEl);
+    paragraphs.forEach(({ text, getBounds }) => {
+      const pRect = getBounds();
+      if (!pRect || pRect.height === 0 || pRect.width === 0) return;
       if (!text.trim()) return;
-      const pOverlay = createExpandOverlay(pRect, false, () => {
+      const pOverlay = createExpandOverlay(pRect, false, scrollContainer, () => {
         removeExpandOverlays();
-        showTldrWithText(text);
+        showPicker(text, getBounds());
       });
       expandOverlayContainer.appendChild(pOverlay);
+      expandOverlayItems.push({ overlay: pOverlay, getBounds });
     });
+
+    expandScrollHandler = () => updateExpandOverlayPositions();
+    window.addEventListener('scroll', expandScrollHandler, { capture: true, passive: true });
 
     registerDismissListeners();
   }
@@ -493,49 +649,67 @@
     positionTrigger(rect);
     triggerHostEl.style.display = 'block';
 
-    triggerShadow.getElementById('kani-rail-btn').addEventListener('click', showTldr);
+    triggerShadow.getElementById('kani-rail-btn').addEventListener('click', () => showPicker(storedSelectionText));
     triggerShadow.getElementById('kani-fab-btn').addEventListener('click', showExpand);
 
     registerScrollDismiss();
     registerDismissListeners();
   }
 
-  function showTldr() {
-    state = 'TLDR';
-    currentTab = currentTab || 'short';
+  function showPicker(text, positionRect) {
+    currentAnalysisText = text;
+    currentMode = null;
     tldrCache = null;
+    state = 'TLDR';
+    if (positionRect) selectionRect = positionRect;
 
     unregisterScrollDismiss();
     triggerHostEl.style.display = 'none';
 
     chrome.runtime.sendMessage({ type: 'GET_AUTH_STATE' }, ({ isSignedIn }) => {
       if (!isSignedIn) { showSignIn(); return; }
-      renderTldrWidget();
-      requestTldr();
+      renderWidget(null, currentTab);
     });
   }
 
-  function showTldrWithText(text) {
-    const wasOpen = state === 'TLDR';
-    state = 'TLDR';
-    currentTab = currentTab || 'short';
-    tldrCache = null;
+  function selectMode(mode) {
+    currentMode = mode;
+    tldrShadow.querySelectorAll('.kani-mode-btn').forEach(b => b.classList.remove('active'));
+    const btn = tldrShadow.getElementById('kani-mode-' + mode);
+    if (btn) btn.classList.add('active');
 
-    chrome.runtime.sendMessage({ type: 'GET_AUTH_STATE' }, ({ isSignedIn }) => {
-      if (!isSignedIn) { showSignIn(); return; }
-      if (!wasOpen) renderTldrWidget();
-      else {
-        const content = tldrShadow.getElementById('kani-content');
-        if (content) content.innerHTML = '<span class="kani-spinner"></span>';
-        const regenBtn = tldrShadow.getElementById('kani-regen-btn');
-        if (regenBtn) regenBtn.disabled = true;
-      }
-      requestTldr(text);
-    });
+    const subtabs = tldrShadow.getElementById('kani-subtabs');
+    const footer   = tldrShadow.getElementById('kani-footer');
+    const content  = tldrShadow.getElementById('kani-content');
+
+    if (mode === 'tldr') {
+      if (subtabs) subtabs.style.display = '';
+      if (footer)  footer.style.display  = '';
+      if (content) content.innerHTML = '<span class="kani-spinner"></span>';
+
+      tldrShadow.getElementById('kani-regen-btn').addEventListener('click', startRegen);
+      tldrShadow.getElementById('kani-save-btn').addEventListener('click', saveTldr);
+      tldrShadow.getElementById('kani-settings-btn').addEventListener('click', showSettings);
+      tldrShadow.querySelectorAll('.kani-tab').forEach(tab => {
+        tab.addEventListener('click', function () {
+          currentTab = this.dataset.tab;
+          tldrShadow.querySelectorAll('.kani-tab').forEach(t => t.classList.remove('active'));
+          this.classList.add('active');
+          renderContent(currentTab);
+        });
+      });
+
+      requestTldr(currentAnalysisText);
+    } else {
+      if (subtabs) subtabs.style.display = 'none';
+      if (footer)  footer.style.display  = 'none';
+      const label = mode === 'terms' ? 'Terms Explorer' : 'Visual Explainer';
+      if (content) content.innerHTML = `<p class="kani-placeholder">${label} — coming soon</p>`;
+    }
   }
 
-  function renderTldrWidget() {
-    renderIntoShadow(tldrShadow, expandedHTML(currentTab));
+  function renderWidget(mode, tab) {
+    renderIntoShadow(tldrShadow, widgetHTML(mode, tab));
     positionTldr(selectionRect);
     tldrHostEl.style.display = 'block';
     const sz = getWidgetDimensions();
@@ -544,18 +718,23 @@
     widgetEl.style.height = sz.h + 'px';
 
     tldrShadow.getElementById('kani-close-btn').addEventListener('click', dismiss);
-    tldrShadow.getElementById('kani-regen-btn').addEventListener('click', startRegen);
-    tldrShadow.getElementById('kani-save-btn').addEventListener('click', saveTldr);
-    tldrShadow.getElementById('kani-settings-btn').addEventListener('click', showSettings);
+    tldrShadow.getElementById('kani-mode-tldr').addEventListener('click', () => selectMode('tldr'));
+    tldrShadow.getElementById('kani-mode-terms').addEventListener('click', () => selectMode('terms'));
+    tldrShadow.getElementById('kani-mode-diagram').addEventListener('click', () => selectMode('diagram'));
 
-    tldrShadow.querySelectorAll('.kani-tab').forEach(tab => {
-      tab.addEventListener('click', function () {
-        currentTab = this.dataset.tab;
-        tldrShadow.querySelectorAll('.kani-tab').forEach(t => t.classList.remove('active'));
-        this.classList.add('active');
-        renderContent(currentTab);
+    if (mode === 'tldr') {
+      tldrShadow.getElementById('kani-regen-btn').addEventListener('click', startRegen);
+      tldrShadow.getElementById('kani-save-btn').addEventListener('click', saveTldr);
+      tldrShadow.getElementById('kani-settings-btn').addEventListener('click', showSettings);
+      tldrShadow.querySelectorAll('.kani-tab').forEach(tab => {
+        tab.addEventListener('click', function () {
+          currentTab = this.dataset.tab;
+          tldrShadow.querySelectorAll('.kani-tab').forEach(t => t.classList.remove('active'));
+          this.classList.add('active');
+          renderContent(currentTab);
+        });
       });
-    });
+    }
 
     makeDraggable(tldrShadow.querySelector('.kani-header'));
     makeResizable(tldrShadow.getElementById('kani-resize-handle'), tldrShadow.querySelector('.kani-widget'));
@@ -579,8 +758,7 @@
           return;
         }
         tldrCache = null;
-        renderTldrWidget();
-        requestTldr();
+        renderWidget(null, currentTab);
       });
     });
   }
@@ -591,9 +769,8 @@
       renderIntoShadow(tldrShadow, settingsHTML(prefs));
 
       tldrShadow.getElementById('kani-back-btn').addEventListener('click', () => {
-        renderTldrWidget();
-        if (tldrCache) renderContent(currentTab);
-        else requestTldr();
+        renderWidget('tldr', currentTab);
+        if (!tldrCache) requestTldr(currentAnalysisText);
       });
       tldrShadow.getElementById('kani-close-btn').addEventListener('click', dismiss);
 
@@ -686,6 +863,7 @@
       if (!rect || (rect.width === 0 && rect.height === 0)) return;
 
       selectionRect = rect;
+      storedSelectionText = sel.toString().trim();
       currentTab = prefs.style;
       currentSize = prefs.size || 'medium';
       currentCustomSize = prefs.customSize || {w:320, h:230};
