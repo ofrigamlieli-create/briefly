@@ -999,7 +999,15 @@
     const startNode = storedRange
       ? (storedRange.startContainer.nodeType === 1 ? storedRange.startContainer : storedRange.startContainer.parentElement)
       : null;
-    const postEl = startNode && startNode.closest ? startNode.closest('article,[role="article"]') : null;
+    let postEl = startNode && startNode.closest ? startNode.closest('article,[role="article"]') : null;
+    // Feeds that don't use <article> mark each post as an ARIA list item
+    // (LinkedIn: role="listitem" inside role="list"). Use the nearest one as the
+    // boundary, but only when it's a sizeable card — so a small <li> bullet
+    // inside an article's list doesn't shrink the zone to a single bullet.
+    if (!postEl && startNode && startNode.closest) {
+      const li = startNode.closest('[role="listitem"]');
+      if (li && li.getBoundingClientRect().height >= window.innerHeight * 0.25) postEl = li;
+    }
     if (postEl) {
       const within = (p) => {
         let c = p.range && p.range.commonAncestorContainer;
