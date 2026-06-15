@@ -12,6 +12,8 @@
   let currentMode = null; // null | 'tldr' | 'terms' | 'diagram'
   let currentAnalysisText = null;
   let storedSelectionText = '';
+  let storedRange = null;
+  let storedZoneEl = null;
   let isRegenerating = false;
   let selectionRect = null;
   let tldrCache = null;
@@ -21,8 +23,11 @@
   let tldrHostEl = null;
   let tldrShadow = null;
   let expandOverlayContainer = null;
-  let expandOverlayItems = []; // { overlay, el } for scroll repositioning
-  let expandScrollHandler = null;
+  let expandOverlayItems = []; // { overlay, getBounds } for per-frame repositioning
+  let expandRafId = null;
+  let expandContainerDocTop = 0;  // overlay container's fixed document-Y origin
+  let expandContainerDocLeft = 0;
+  let expandScrollContainer = null; // scrollable ancestor of the zone (null = window scroll)
 
   // ── Storage helpers ──────────────────────────────────────────
 
@@ -90,7 +95,11 @@
   function onDocMousedown(e) {
     const inTrigger = triggerHostEl && triggerHostEl.contains(e.target);
     const inTldr = tldrHostEl && tldrHostEl.contains(e.target);
-    if (!inTrigger && !inTldr) dismiss();
+    // Expand overlays live in expandOverlayContainer (appended to <body>, not
+    // inside either shadow host). Without this guard, mousedown on a paragraph/
+    // zone overlay dismisses everything before its click can fire showPicker.
+    const inExpand = expandOverlayContainer && expandOverlayContainer.contains(e.target);
+    if (!inTrigger && !inTldr && !inExpand) dismiss();
   }
 
   function onDocKeydown(e) {
@@ -238,6 +247,7 @@
         <div class="kani-content" style="text-align:center; padding: 20px 16px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
           <p style="margin-bottom:12px; font-size:13px; color:#555; font-weight:400">Sign in to get your TLDR</p>
           <button class="kani-google-btn" id="kani-signin-btn">Sign in with Google</button>
+          <p id="kani-signin-err" style="margin-top:8px; font-size:11px; color:#e57373; min-height:16px;"></p>
         </div>
       </div>
     `;
@@ -423,26 +433,113 @@
   // ── Expand overlays ──────────────────────────────────────────
 
   function removeExpandOverlays() {
+    if (expandRafId) {
+      cancelAnimationFrame(expandRafId);
+      expandRafId = null;
+    }
     if (expandOverlayContainer) {
       expandOverlayContainer.remove();
       expandOverlayContainer = null;
     }
+    expandScrollContainer = null;
     expandOverlayItems = [];
-    if (expandScrollHandler) {
-      window.removeEventListener('scroll', expandScrollHandler, true);
-      expandScrollHandler = null;
+  }
+
+  // Overlays are position:absolute in DOCUMENT coordinates. For ordinary page
+  // (window) scrolling the browser moves them natively in lockstep with the text
+  // — zero lag — because document-Y (rect.top + scrollY) stays constant, so the
+  // per-frame write is a no-op and native scrolling does the work. The rAF loop
+  // only does real work for inner-panel scroll, where scrollY doesn't change.
+  // Find the bottom edge (viewport px) of any fixed/sticky bar pinned to the top
+  // of the page — e.g. LinkedIn's nav (Home/My Network/Jobs/Messaging). Overlay
+  // boxes must be clipped below this line so they never paint over that bar as
+  // the text they mark scrolls up underneath it. Universal: no per-site code.
+  function getTopOcclusionBottom() {
+    const w = window.innerWidth;
+    const maxBar = window.innerHeight * 0.4; // ignore tall overlays/modals
+    const minW = w * 0.25;                    // wide enough to be a bar, not a button
+    let bottom = 0;
+
+    const consider = (node) => {
+      if (!node || node.nodeType !== 1) return;
+      if (node.id === 'kani-widget-host' || node.id === 'kani-expand-overlay-root') return;
+      let cs;
+      try { cs = getComputedStyle(node); } catch (_) { return; }
+      if (cs.position !== 'fixed' && cs.position !== 'sticky') return;
+      if (cs.visibility === 'hidden' || cs.display === 'none') return;
+      const r = node.getBoundingClientRect();
+      // A real top bar: anchored at the top, wide, short.
+      if (r.top <= 1 && r.width >= minW && r.bottom > bottom && r.bottom < maxBar) {
+        bottom = r.bottom;
+      }
+    };
+
+    // Source A — standard top-of-page landmarks. Catches LinkedIn's <header>
+    // global nav, which the point-sampling below can miss.
+    let landmarks;
+    try { landmarks = document.querySelectorAll('header, nav, [role="banner"], [role="navigation"]'); }
+    catch (_) { landmarks = []; }
+    landmarks.forEach(consider);
+
+    // Source B — point-sampling + ancestor climb. Catches in-column sticky
+    // headers (e.g. Twitter's "Post" bar) that aren't header/nav landmarks.
+    const xs = [w * 0.2, w * 0.5, w * 0.8];
+    for (const x of xs) {
+      let els;
+      try { els = document.elementsFromPoint(x, 2); } catch (_) { continue; }
+      for (const el of els) {
+        let node = el, hops = 0;
+        while (node && node.nodeType === 1 && hops < 25) {
+          consider(node);
+          node = node.parentElement;
+          hops++;
+        }
+      }
     }
+    return bottom;
+  }
+
+  // Top edge (viewport px) above which overlays must be clipped: the greater of
+  // any pinned/sticky header bottom and the top of the scroll container holding
+  // the text. On LinkedIn the text scrolls inside <main> (top ≈ 52) under a
+  // static nav, so the scroll-container top is what clips the green off the nav.
+  function getOverlayClipLine() {
+    let line = getTopOcclusionBottom();
+    if (expandScrollContainer) {
+      try {
+        const t = expandScrollContainer.getBoundingClientRect().top;
+        if (t > line) line = t;
+      } catch (_) {}
+    }
+    return line;
   }
 
   function updateExpandOverlayPositions() {
+    const sx = window.scrollX, sy = window.scrollY;
+    const headerBottom = getOverlayClipLine();
     expandOverlayItems.forEach(({ overlay, getBounds }) => {
-      const r = getBounds();
-      if (!r || r.height === 0) return;
-      overlay.style.top    = r.top    + 'px';
-      overlay.style.left   = r.left   + 'px';
+      let r = null;
+      try { r = getBounds(); } catch (_) { r = null; }
+      if (!r || r.height === 0) { overlay.style.display = 'none'; return; }
+      // Fully above the clip line → hide entirely.
+      if (r.bottom <= headerBottom) { overlay.style.display = 'none'; return; }
+      overlay.style.display = 'block';
+      overlay.style.top    = (r.top  + sy - expandContainerDocTop)  + 'px';
+      overlay.style.left   = (r.left + sx - expandContainerDocLeft) + 'px';
       overlay.style.width  = r.width  + 'px';
       overlay.style.height = r.height + 'px';
+      // Clip the slice that would render above the bar (measured from box top).
+      const clipTop = Math.max(0, headerBottom - r.top);
+      overlay.style.clipPath = clipTop > 0 ? `inset(${clipTop}px 0 0 0)` : 'none';
     });
+  }
+
+  function startExpandSyncLoop() {
+    const tick = () => {
+      try { updateExpandOverlayPositions(); } catch (_) { /* keep the loop alive */ }
+      expandRafId = requestAnimationFrame(tick);
+    };
+    expandRafId = requestAnimationFrame(tick);
   }
 
   function findScrollableContainer(el) {
@@ -465,119 +562,309 @@
     return { top, left, width: right - left, height: bottom - top };
   }
 
-  // Split a leaf element into paragraph chunks at <br><br> boundaries.
-  // Returns [{text, range}] or null if no double-breaks found.
-  function splitByDoubleBreaks(leafEl) {
-    const brs = Array.from(leafEl.querySelectorAll('br'));
-    const boundaries = [];
-    for (let i = 0; i < brs.length - 1; i++) {
-      let node = brs[i].nextSibling;
-      while (node && node !== brs[i + 1] && node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) {
-        node = node.nextSibling;
-      }
-      if (node === brs[i + 1]) { boundaries.push([brs[i], brs[i + 1]]); i++; }
-    }
-    if (!boundaries.length) return null;
+  const PARA_MIN_WORDS = 3;
+  const GAP_FACTOR = 0.75;        // blank vertical gap (× line height) that starts a new paragraph
+  const INDENT_FACTOR = 1.5;      // left-edge jump (× line height) that starts a new paragraph
+  const wordCount = (s) => (s || '').trim().split(/\s+/).filter(Boolean).length;
+  const isHeadingEl = (el) => !!el && /^H[1-6]$/.test(el.tagName || '');
 
-    const MIN = 3;
-    const chunks = [];
-    const tryAdd = (makeRange) => {
-      try {
-        const r = makeRange();
-        const text = r.toString().trim();
-        if (text.split(/\s+/).length >= MIN) chunks.push({ text, range: r });
-      } catch (_) {}
-    };
-
-    tryAdd(() => {
-      const r = document.createRange();
-      r.setStart(leafEl, 0); r.setEndBefore(boundaries[0][0]); return r;
-    });
-    for (let i = 0; i < boundaries.length - 1; i++) {
-      tryAdd(() => {
-        const r = document.createRange();
-        r.setStartAfter(boundaries[i][1]); r.setEndBefore(boundaries[i + 1][0]); return r;
-      });
-    }
-    tryAdd(() => {
-      const r = document.createRange();
-      r.setStartAfter(boundaries[boundaries.length - 1][1]);
-      r.setEnd(leafEl, leafEl.childNodes.length); return r;
-    });
-
-    return chunks.length >= 2 ? chunks : null;
+  // Reject embedded-media blocks so paragraph boxes never land on a video or
+  // iframe. Conservative on purpose — only real media tags, never class/id
+  // substring guesses (those wrongly flag normal article/feed markup).
+  const AD_MEDIA_SELECTOR = 'iframe,video';
+  function isAdOrMedia(el) {
+    if (!el || typeof el.closest !== 'function') return false;
+    if (el.closest(AD_MEDIA_SELECTOR)) return true;
+    return !!el.querySelector('video, iframe');
   }
 
-  // Returns [{el?, range?, text, getBounds}]
+  // A video player / embed marks a section boundary — but an AD does not. Ads
+  // sit between the standfirst and the body (e.g. Goal), so cutting on them would
+  // drop the intro; real video players (Goal's trailing clip) should cut so the
+  // zone never spans the player. Matched by explicit player class, never "ad".
+  const VIDEO_BOUNDARY_SELECTOR =
+    'video,[class*="video-player"],[class*="videoPlayer"],[data-testid*="video-player"]';
+  function isSectionBoundary(el) {
+    if (isHeadingEl(el)) return true;
+    try { return typeof el.matches === 'function' && el.matches(VIDEO_BOUNDARY_SELECTOR); }
+    catch (_) { return false; }
+  }
+
+  // When zoneEl is a single <p>, find the ancestor container whose section
+  // (the run of paragraphs around pEl, bounded by headings and video players)
+  // yields the MOST qualifying <p> elements. Climbing to the widest such section
+  // captures siblings that live in separate sub-containers — e.g. Goal wraps the
+  // standfirst and the article body in different divs, so stopping at the body
+  // alone would miss the intro. Returns [] if no section has ≥ 2 paragraphs.
+  function getSectionSiblings(pEl) {
+    function getParasInSection(container) {
+      // Collect headings, video players, and <p> elements in document order.
+      const items = [];
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT, {
+        acceptNode(el) {
+          const tag = el.tagName?.toLowerCase();
+          if (tag === 'p' || isSectionBoundary(el)) return NodeFilter.FILTER_ACCEPT;
+          return NodeFilter.FILTER_SKIP;
+        }
+      });
+      let node;
+      while ((node = walker.nextNode())) items.push(node);
+
+      const idx = items.indexOf(pEl);
+      if (idx === -1) return null;
+
+      let start = 0;
+      for (let i = idx - 1; i >= 0; i--) {
+        if (isSectionBoundary(items[i])) { start = i + 1; break; }
+      }
+      let end = items.length;
+      for (let i = idx + 1; i < items.length; i++) {
+        if (isSectionBoundary(items[i])) { end = i; break; }
+      }
+
+      return items.slice(start, end).filter(c =>
+        c.tagName?.toLowerCase() === 'p' && wordCount(c.innerText) >= PARA_MIN_WORDS && !isAdOrMedia(c)
+      );
+    }
+
+    let best = [];
+    let candidate = pEl.parentElement;
+    while (candidate && !['body', 'html'].includes(candidate.tagName?.toLowerCase())) {
+      const ps = getParasInSection(candidate);
+      if (ps && ps.length > best.length) best = ps;
+      candidate = candidate.parentElement;
+    }
+    return best.length >= 2 ? best : [];
+  }
+
+  // Universal, render-based paragraph detection.
+  // Reads what's actually drawn on screen (per-line rects) instead of trusting
+  // <p> tags or <br> patterns, so it works on articles AND social feeds.
+  // Returns [{ range, text, getBounds }].
   function findParagraphs(zoneEl) {
-    const MIN = 3;
-    const hasWords = (el) => (el.innerText || el.textContent || '').trim().split(/\s+/).length >= MIN;
+    const zoneWords = wordCount(zoneEl.innerText || zoneEl.textContent);
 
-    // 1. Semantic block elements — treat entire lists as one unit
-    const semantic = Array.from(zoneEl.querySelectorAll('p, ul, ol, blockquote')).filter(hasWords);
+    // 1. Semantic fast-path — only when clean elements cover most of the zone.
+    const semantic = collectSemanticBlocks(zoneEl).filter(el => wordCount(el.innerText) >= PARA_MIN_WORDS && !isAdOrMedia(el));
     if (semantic.length >= 2) {
-      return semantic.map(el => ({ el, text: el.innerText || '', getBounds: () => el.getBoundingClientRect() }));
-    }
-
-    // 2. Walk DOM for leaf blocks, then try to split each by <br><br>
-    const BLOCK = new Set(['P','DIV','SECTION','ARTICLE','BLOCKQUOTE','LI','H1','H2','H3','H4','H5','H6']);
-    const leafEls = [];
-    function walk(el, depth) {
-      if (depth > 10 || !hasWords(el)) return;
-      const blockKids = Array.from(el.children).filter(c => BLOCK.has(c.tagName) && hasWords(c));
-      if (blockKids.length === 0) leafEls.push(el);
-      else blockKids.forEach(c => walk(c, depth + 1));
-    }
-    Array.from(zoneEl.children).forEach(c => walk(c, 0));
-    const deduped = leafEls.filter((el, i) => !leafEls.some((o, j) => i !== j && el.contains(o)));
-
-    const result = [];
-    for (const el of deduped) {
-      const brChunks = splitByDoubleBreaks(el);
-      if (brChunks) {
-        brChunks.forEach(({ text, range }) => {
-          result.push({ range, text, getBounds: () => getUnionRect(range.getClientRects()) });
+      const covered = semantic.reduce((sum, el) => sum + wordCount(el.innerText), 0);
+      if (zoneWords > 0 && covered / zoneWords >= 0.70) {
+        return semantic.map(el => {
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          return { range, text: (el.innerText || '').trim(), getBounds: () => getUnionRect(range.getClientRects()) };
         });
-      } else {
-        result.push({ el, text: el.innerText || '', getBounds: () => el.getBoundingClientRect() });
       }
     }
-    if (result.length >= 1) return result;
 
-    // 3. Fallback: direct children
-    return Array.from(zoneEl.children).filter(hasWords).map(el => ({
-      el, text: el.innerText || '', getBounds: () => el.getBoundingClientRect()
-    }));
+    // 2. Visual-gap engine.
+    const groups = groupByVisualGap(zoneEl);
+    if (groups.length) return groups;
+
+    // 3. Last resort: whole zone as one paragraph.
+    const range = document.createRange();
+    range.selectNodeContents(zoneEl);
+    return [{ range, text: (zoneEl.innerText || '').trim(), getBounds: () => getUnionRect(range.getClientRects()) }];
+  }
+
+  // p / blockquote plus top-level lists (a list is one block).
+  function collectSemanticBlocks(zoneEl) {
+    const lists = Array.from(zoneEl.querySelectorAll('ul, ol'))
+      .filter(l => !l.parentElement.closest('ul, ol'));
+    const blocks = Array.from(zoneEl.querySelectorAll('p, blockquote'))
+      .filter(b => !lists.some(l => l.contains(b)));
+    const all = blocks.concat(lists);
+    all.sort((a, b) => {
+      const pos = a.compareDocumentPosition(b);
+      return (pos & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+    });
+    return all;
+  }
+
+  // Walk visible text, break it into "segments" (a run of text between
+  // newlines — this is what splits tweets that pack a whole post into one
+  // node with \n line breaks), then cut a new paragraph at a blank vertical
+  // gap, a left-indent jump, or a heading. Finally fold lone single lines
+  // into a neighbour so we never draw a box around one bare line.
+  function groupByVisualGap(zoneEl) {
+    const excludeSel = (window.KaniSelectionDetector && window.KaniSelectionDetector.HARD_EXCLUDED_SELECTOR) ||
+      'header,footer,nav,aside,button,input,select,textarea';
+    const walker = document.createTreeWalker(zoneEl, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.textContent.trim()) return NodeFilter.FILTER_REJECT;
+        const p = node.parentElement;
+        if (!p || p.closest(excludeSel) || p.closest('a') || p.closest(AD_MEDIA_SELECTOR)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+
+    const segs = [];
+    const allLineHeights = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      const txt = n.textContent;
+      const block = n.parentElement.closest('p,div,section,article,blockquote,li,h1,h2,h3,h4,h5,h6') || n.parentElement;
+      let start = 0;
+      const flush = (end) => {
+        if (txt.slice(start, end).trim()) {
+          const range = document.createRange();
+          range.setStart(n, start); range.setEnd(n, end);
+          const rects = Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0);
+          if (rects.length) {
+            rects.forEach(r => allLineHeights.push(r.height));
+            segs.push({
+              node: n, start, end,
+              top: Math.min(...rects.map(r => r.top)),
+              bottom: Math.max(...rects.map(r => r.bottom)),
+              left: Math.min(...rects.map(r => r.left)),
+              lines: rects.length,
+              block,
+            });
+          }
+        }
+        start = end + 1;
+      };
+      for (let i = 0; i < txt.length; i++) if (txt[i] === '\n') flush(i);
+      flush(txt.length);
+    }
+    if (!segs.length) return [];
+
+    const lineH = median(allLineHeights) || 16;
+    segs.sort((a, b) => (a.top - b.top) || (a.left - b.left));
+
+    // Gap-based grouping.
+    const groups = [];
+    let cur = null;
+    for (const s of segs) {
+      const heading = isHeadingEl(s.block);
+      let cut = !cur;
+      if (cur) {
+        const gap = s.top - cur.bottom;
+        if (gap > GAP_FACTOR * lineH) cut = true;
+        else if (s.left - cur.left > INDENT_FACTOR * lineH) cut = true;
+        else if (heading || cur.heading) cut = true;
+      }
+      if (cut) {
+        cur = { segs: [s], bottom: s.bottom, left: s.left, lines: s.lines, heading };
+        groups.push(cur);
+      } else {
+        cur.segs.push(s);
+        cur.bottom = Math.max(cur.bottom, s.bottom);
+        cur.left = Math.min(cur.left, s.left);
+        cur.lines += s.lines;
+      }
+    }
+
+    // Fold single-line groups forward into the next multi-line group (or, if
+    // trailing, back into the previous), so a lone line never stands alone.
+    const merged = [];
+    let pending = [];
+    for (const g of groups) {
+      if (g.heading) continue;            // titles/subheads aren't summarizable paragraphs
+      if (g.lines <= 1) {
+        pending = pending.concat(g.segs);
+      } else {
+        merged.push({ segs: pending.concat(g.segs) });
+        pending = [];
+      }
+    }
+    if (pending.length) {
+      if (merged.length) merged[merged.length - 1].segs.push(...pending);
+      else merged.push({ segs: pending });   // whole zone was single lines → one block
+    }
+
+    // Build a range per merged group.
+    const result = [];
+    for (const g of merged) {
+      const first = g.segs[0];
+      const last = g.segs[g.segs.length - 1];
+      const range = document.createRange();
+      range.setStart(first.node, first.start);
+      range.setEnd(last.node, last.end);
+      const text = range.toString().trim();
+      if (wordCount(text) < PARA_MIN_WORDS) continue;
+      result.push({ range, text, getBounds: () => getUnionRect(range.getClientRects()) });
+    }
+    return result;
+  }
+
+  // Nearest common ancestor element shared by every paragraph's range.
+  function commonAncestorOf(paragraphs) {
+    let anc = null;
+    for (const p of paragraphs) {
+      let c = p.range && p.range.commonAncestorContainer;
+      if (c && c.nodeType !== Node.ELEMENT_NODE) c = c.parentElement;
+      if (!c) continue;
+      if (!anc) { anc = c; continue; }
+      while (anc && !anc.contains(c)) anc = anc.parentElement;
+    }
+    return anc;
+  }
+
+  // Reject paragraphs that geometrically overlap an embedded video/iframe.
+  // Scoped to media INSIDE the content block only — scanning the whole document
+  // would catch unrelated page iframes (ads, embeds, trackers) on sites like
+  // LinkedIn/Goal and wrongly delete real paragraphs.
+  function rejectMediaOverlaps(paragraphs) {
+    const scope = commonAncestorOf(paragraphs);
+    if (!scope) return paragraphs;
+    const mediaRects = Array.from(scope.querySelectorAll('video, iframe'))
+      .map(m => m.getBoundingClientRect())
+      .filter(r => r.width > 0 && r.height > 0);
+    if (!mediaRects.length) return paragraphs;
+    const overlaps = (a, b) => {
+      const ix = Math.max(0, Math.min(a.left + a.width, b.right) - Math.max(a.left, b.left));
+      const iy = Math.max(0, Math.min(a.top + a.height, b.bottom) - Math.max(a.top, b.top));
+      const inter = ix * iy;
+      return inter > 0.35 * (a.width * a.height);
+    };
+    return paragraphs.filter(p => {
+      const r = p.getBounds();
+      if (!r || r.height === 0) return true;
+      return !mediaRects.some(m => overlaps(r, m));
+    });
+  }
+
+  function median(nums) {
+    if (!nums.length) return 0;
+    const s = nums.slice().sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
   }
 
   function createExpandOverlay(rect, isZone, scrollContainer, onClick) {
     const el = document.createElement('div');
     el.style.cssText = [
-      'position:fixed',
+      'position:absolute',
       'border-radius:3px',
       'box-sizing:border-box',
-      'transition:background 0.12s',
-      `top:${rect.top}px`,
-      `left:${rect.left}px`,
+      `top:${rect.top + window.scrollY - expandContainerDocTop}px`,
+      `left:${rect.left + window.scrollX - expandContainerDocLeft}px`,
       `width:${rect.width}px`,
       `height:${rect.height}px`,
       isZone
-        ? 'pointer-events:all;cursor:pointer;background:transparent;border:2px solid rgba(61,157,166,0.45);z-index:2147483640;'
-        : 'pointer-events:all;cursor:pointer;background:rgba(32,120,90,0.22);border:1px solid rgba(32,120,90,0.40);z-index:2147483641;'
+        ? 'pointer-events:all;cursor:pointer;background:rgba(46,160,110,0.10);border:2px solid rgba(46,160,110,0.45);z-index:2147483640;'
+        : 'pointer-events:all;cursor:pointer;background:rgba(32,120,90,0.30);border:1px solid rgba(32,120,90,0.45);z-index:2147483641;'
     ].join(';');
 
     if (isZone) {
-      el.addEventListener('mouseenter', () => { el.style.borderColor = 'rgba(61,157,166,0.75)'; });
-      el.addEventListener('mouseleave', () => { el.style.borderColor = 'rgba(61,157,166,0.45)'; });
+      el.addEventListener('mouseenter', () => {
+        el.style.background = 'rgba(46,160,110,0.20)';
+        el.style.borderColor = 'rgba(46,160,110,0.75)';
+      });
+      el.addEventListener('mouseleave', () => {
+        el.style.background = 'rgba(46,160,110,0.10)';
+        el.style.borderColor = 'rgba(46,160,110,0.45)';
+      });
       el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     } else {
       el.addEventListener('mouseenter', () => {
-        el.style.background = 'rgba(32,120,90,0.38)';
-        el.style.borderColor = 'rgba(32,120,90,0.65)';
+        el.style.background = 'rgba(32,120,90,0.50)';
+        el.style.borderColor = 'rgba(32,120,90,0.70)';
       });
       el.addEventListener('mouseleave', () => {
-        el.style.background = 'rgba(32,120,90,0.22)';
-        el.style.borderColor = 'rgba(32,120,90,0.40)';
+        el.style.background = 'rgba(32,120,90,0.30)';
+        el.style.borderColor = 'rgba(32,120,90,0.45)';
       });
       el.addEventListener('wheel', (e) => {
         if (scrollContainer) {
@@ -594,35 +881,100 @@
   }
 
   function showExpand() {
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
+    if (!storedRange || !storedZoneEl) return;
 
-    const range = sel.getRangeAt(0);
-    const detector = window.KaniSelectionDetector;
-    const zoneEl = detector ? detector.findDeepestContentZone(range) : null;
-    if (!zoneEl) return;
+    chrome.runtime.sendMessage({ type: 'GET_AUTH_STATE' }, (res) => {
+      if (!res || !res.isSignedIn) {
+        unregisterScrollDismiss();
+        triggerHostEl.style.display = 'none';
+        showSignIn();
+        return;
+      }
+      _doExpand(storedZoneEl);
+    });
+  }
 
+  function _doExpand(zoneEl) {
     state = 'EXPAND';
     triggerHostEl.style.display = 'none';
     unregisterScrollDismiss();
+    window.getSelection()?.removeAllRanges();
 
     removeExpandOverlays();
     expandOverlayContainer = document.createElement('div');
-    expandOverlayContainer.style.cssText = 'position:static;pointer-events:none;';
+    expandOverlayContainer.id = 'kani-expand-overlay-root';
+    expandOverlayContainer.style.cssText = 'position:absolute;top:0;left:0;width:0;height:0;pointer-events:none;';
     document.body.appendChild(expandOverlayContainer);
+    // Capture the container's document-relative origin once. Overlays are
+    // absolute children of it, so this stays valid through native scrolling.
+    const __co = expandOverlayContainer.getBoundingClientRect();
+    expandContainerDocTop  = __co.top  + window.scrollY;
+    expandContainerDocLeft = __co.left + window.scrollX;
 
     const scrollContainer = findScrollableContainer(zoneEl);
+    expandScrollContainer = scrollContainer;
 
-    const zoneRect = zoneEl.getBoundingClientRect();
-    const zoneText = zoneEl.innerText || zoneEl.textContent || '';
-    const zoneOverlay = createExpandOverlay(zoneRect, true, scrollContainer, () => {
-      removeExpandOverlays();
-      showPicker(zoneText, zoneEl.getBoundingClientRect());
-    });
-    expandOverlayContainer.appendChild(zoneOverlay);
-    expandOverlayItems.push({ overlay: zoneOverlay, getBounds: () => zoneEl.getBoundingClientRect() });
+    // Expand to all <p> siblings in the same section (bounded by headings and
+    // video players). Seed with a real <p> even when the zone is a wrapper div —
+    // a multi-paragraph selection resolves the zone to the article-body div, but
+    // the standfirst/intro lives in a sibling container above it, so seeding lets
+    // the section walk climb high enough to include it (e.g. Goal, Wikipedia).
+    let paragraphs;
+    let seedP = null;
+    if (zoneEl.tagName?.toLowerCase() === 'p') {
+      seedP = zoneEl;
+    } else {
+      const startEl = storedRange
+        ? (storedRange.startContainer.nodeType === 1 ? storedRange.startContainer : storedRange.startContainer.parentElement)
+        : null;
+      // Only seed from the <p> the selection actually starts in — never a random
+      // <p> elsewhere in the zone (keeps <p>-less feeds like LinkedIn unaffected).
+      seedP = startEl && startEl.closest ? startEl.closest('p') : null;
+    }
+    if (seedP) {
+      const siblings = getSectionSiblings(seedP);
+      if (siblings.length >= 2) {
+        paragraphs = siblings.map(el => {
+          const r = document.createRange();
+          r.selectNodeContents(el);
+          return { range: r, text: (el.innerText || '').trim(), getBounds: () => getUnionRect(Array.from(r.getClientRects())) };
+        });
+      }
+    }
+    if (!paragraphs) paragraphs = findParagraphs(zoneEl);
 
-    const paragraphs = findParagraphs(zoneEl);
+    // Drop any paragraph whose box overlaps an embedded video/iframe (e.g. a
+    // video's overlaid caption text on Goal). Text-node detection can't tell a
+    // caption that floats on top of a video from real article prose, so reject
+    // it geometrically by intersection with the media element's on-screen rect.
+    paragraphs = rejectMediaOverlaps(paragraphs);
+
+    // Zone = the area hugging just the detected paragraphs (so title, media,
+    // and tags fall outside), and its text = those paragraphs combined.
+    // Uses the median of per-paragraph right edges so floated sidebars (e.g.
+    // Wikipedia infobox) don't widen the zone, while text within the article
+    // column isn't clipped (per-line median was too aggressive).
+    const zoneBounds = () => {
+      const pBounds = paragraphs.map(p => p.getBounds()).filter(Boolean);
+      if (!pBounds.length) return null;
+      const top    = Math.min(...pBounds.map(r => r.top));
+      const left   = Math.min(...pBounds.map(r => r.left));
+      const bottom = Math.max(...pBounds.map(r => r.top + r.height));
+      const rights = pBounds.map(r => r.left + r.width).sort((a, b) => a - b);
+      const right  = rights[Math.floor(rights.length / 2)];
+      return { top, left, width: right - left, height: bottom - top };
+    };
+    const zoneText = paragraphs.map(p => p.text).join('\n\n') || zoneEl.innerText || '';
+    const zoneRect = zoneBounds();
+    if (zoneRect) {
+      const zoneOverlay = createExpandOverlay(zoneRect, true, scrollContainer, () => {
+        removeExpandOverlays();
+        showPicker(zoneText, zoneBounds());
+      });
+      expandOverlayContainer.appendChild(zoneOverlay);
+      expandOverlayItems.push({ overlay: zoneOverlay, getBounds: zoneBounds });
+    }
+
     paragraphs.forEach(({ text, getBounds }) => {
       const pRect = getBounds();
       if (!pRect || pRect.height === 0 || pRect.width === 0) return;
@@ -635,8 +987,7 @@
       expandOverlayItems.push({ overlay: pOverlay, getBounds });
     });
 
-    expandScrollHandler = () => updateExpandOverlayPositions();
-    window.addEventListener('scroll', expandScrollHandler, { capture: true, passive: true });
+    startExpandSyncLoop();
 
     registerDismissListeners();
   }
@@ -666,8 +1017,8 @@
     unregisterScrollDismiss();
     triggerHostEl.style.display = 'none';
 
-    chrome.runtime.sendMessage({ type: 'GET_AUTH_STATE' }, ({ isSignedIn }) => {
-      if (!isSignedIn) { showSignIn(); return; }
+    chrome.runtime.sendMessage({ type: 'GET_AUTH_STATE' }, (res) => {
+      if (!res || !res.isSignedIn) { showSignIn(); return; }
       renderWidget(null, currentTab);
     });
   }
@@ -749,16 +1100,20 @@
     tldrShadow.getElementById('kani-close-btn').addEventListener('click', dismiss);
     tldrShadow.getElementById('kani-signin-btn').addEventListener('click', () => {
       const btn = tldrShadow.getElementById('kani-signin-btn');
+      const errEl = tldrShadow.getElementById('kani-signin-err');
       btn.disabled = true;
       btn.textContent = 'Signing in…';
+      if (errEl) errEl.textContent = '';
       chrome.runtime.sendMessage({ type: 'SIGN_IN' }, result => {
-        if (result.error) {
+        if (!result || result.error) {
           btn.disabled = false;
           btn.textContent = 'Sign in with Google';
+          if (errEl) errEl.textContent = result?.error || 'Could not connect. Try again.';
           return;
         }
         tldrCache = null;
-        renderWidget(null, currentTab);
+        renderWidget('tldr', currentTab);
+        requestTldr(currentAnalysisText);
       });
     });
   }
@@ -864,6 +1219,9 @@
 
       selectionRect = rect;
       storedSelectionText = sel.toString().trim();
+      storedRange = sel.getRangeAt(0).cloneRange();
+      const detector = window.KaniSelectionDetector;
+      storedZoneEl = detector ? detector.findDeepestContentZone(storedRange) : null;
       currentTab = prefs.style;
       currentSize = prefs.size || 'medium';
       currentCustomSize = prefs.customSize || {w:320, h:230};
