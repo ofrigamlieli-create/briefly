@@ -84,6 +84,12 @@ async function fetchTldr(text) {
   })
 
   if (res.status === 401) { await clearSession(); return { error: 'AUTH_REQUIRED' } }
+  if (res.status === 403) return { error: 'TRIAL_EXHAUSTED' }
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({}))
+    if (body.error === 'rate_limited') return { error: 'RATE_LIMITED' }
+    return { error: 'DAILY_LIMIT_REACHED' }
+  }
   if (!res.ok) return { error: 'SERVER_ERROR' }
   return { data: await res.json() }
 }

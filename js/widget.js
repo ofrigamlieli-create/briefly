@@ -296,6 +296,9 @@
     const text = sel ? sel.toString().trim() : '';
     chrome.runtime.sendMessage({ type: 'GET_TLDR', text }, result => {
       if (result.error === 'AUTH_REQUIRED') { showSignIn(); return; }
+      if (result.error === 'TRIAL_EXHAUSTED') { showUpgrade(); return; }
+      if (result.error === 'DAILY_LIMIT_REACHED') { showError('Daily limit reached. Resets tomorrow.'); return; }
+      if (result.error === 'RATE_LIMITED') { showError('Slow down — too many requests.'); return; }
       if (result.error) { showError(); return; }
       tldrCache = result.data;
       renderContent(currentTab);
@@ -305,9 +308,23 @@
     });
   }
 
-  function showError() {
+  function showError(msg) {
     const el = tldrShadow.getElementById('kani-content');
-    if (el) el.innerHTML = '<p style="color:#e57373;font-size:12px">Something went wrong. Try again.</p>';
+    const text = msg || 'Something went wrong. Try again.';
+    if (el) el.innerHTML = `<p style="color:#e57373;font-size:12px">${text}</p>`;
+    isRegenerating = false;
+    const btn = tldrShadow.getElementById('kani-regen-btn');
+    if (btn) btn.disabled = false;
+  }
+
+  function showUpgrade() {
+    const el = tldrShadow.getElementById('kani-content');
+    if (el) el.innerHTML = `
+      <div style="text-align:center;padding:12px 8px">
+        <p style="font-size:13px;margin:0 0 8px">You've used your free TLDRs.</p>
+        <p style="font-size:12px;color:#888;margin:0 0 12px">Upgrade to keep reading smarter.</p>
+        <button id="kani-upgrade-btn" style="background:#1a73e8;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer">Upgrade — $5/mo</button>
+      </div>`;
     isRegenerating = false;
     const btn = tldrShadow.getElementById('kani-regen-btn');
     if (btn) btn.disabled = false;
