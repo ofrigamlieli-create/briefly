@@ -11,7 +11,7 @@
 | Manifest V3 setup | ✅ Working | v0.0.1, named "Kani" |
 | Smart trigger (content zone detection) | ✅ Verified working | `js/selection-detector.js` + `js/selection-listener.js`. 20-word gate, DOM walk, link density <30%, dedup, fires `kani:selection-qualified`. Background service worker is empty placeholder. |
 | Small widget + TLDR | ❌ Not started | — |
-| Large widget + content expansion | ❌ Not started | — |
+| Large widget + content expansion | ✅ Working | 肝 FAB → expand mode, zone + paragraph highlights, in-place TLDR replacement |
 | Term Explorer | ❌ Not started | — |
 | Visual Explainer (diagrams) | ❌ Not started | — |
 | Settings & preferences | ❌ Not started | — |
@@ -36,8 +36,8 @@ Grammarly-style floating widget appears on text selection (20+ words in a conten
 **1.3 — Supabase backend + auth**
 Set up Supabase project. Edge Function for TLDR generation (receives text + auth token, calls Claude, returns summary). Google sign-in via Supabase Auth. Extension stores auth session only. API key server-side only — verify in DevTools.
 
-**1.4 — Large widget + content zone expansion**
-Expand button on small widget. Full content zone highlighted in one color, individual paragraphs in another. Click full zone or single paragraph → TLDR for chosen scope.
+**1.4 — Large widget + content zone expansion** ✅ Complete
+肝 FAB on trigger enters expand mode. Full content zone highlighted in teal, paragraphs glow on hover. Click zone or paragraph → TLDR for that scope. Replaces in-place if widget already open.
 
 **Done when Phase 1 is complete:** User can install extension, sign in, select text on any site, get a TLDR in 3 styles, expand to full content zone. Works on Twitter, LinkedIn, Reddit, news articles. No API key exposed.
 

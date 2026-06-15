@@ -107,13 +107,16 @@
               continue;
             }
 
-            const linkButtonCount = candidate.querySelectorAll("a,button").length;
-            const totalElementCount = candidate.querySelectorAll("*").length;
-
-            if (totalElementCount > 0) {
-              const ratio = linkButtonCount / totalElementCount;
-              if (ratio < 0.30) return candidate;
-            }
+            // Reject link lists / menus by the share of WORDS inside links,
+            // not the count of link elements — so link-rich prose (e.g. a
+            // Wikipedia intro) still qualifies while nav menus don't.
+            // Only count <a> tags, not buttons — action bars (Like/Comment/
+            // Repost/Send) would otherwise inflate the count and block social feeds.
+            let linkWords = 0;
+            candidate.querySelectorAll("a").forEach((el) => {
+              linkWords += countWords(el.innerText || el.textContent || "");
+            });
+            if (linkWords / wordCount < 0.30) return candidate;
           }
         }
       }
