@@ -623,7 +623,8 @@
       }
 
       return items.slice(start, end).filter(c =>
-        c.tagName?.toLowerCase() === 'p' && wordCount(c.innerText) >= PARA_MIN_WORDS && !isAdOrMedia(c)
+        c.tagName?.toLowerCase() === 'p' && wordCount(c.innerText) >= PARA_MIN_WORDS && !isAdOrMedia(c) &&
+        (!window.KaniProse || !window.KaniProse.looksLikeMetadata(c.innerText))
       );
     }
 
@@ -645,7 +646,8 @@
     const zoneWords = wordCount(zoneEl.innerText || zoneEl.textContent);
 
     // 1. Semantic fast-path — only when clean elements cover most of the zone.
-    const semantic = collectSemanticBlocks(zoneEl).filter(el => wordCount(el.innerText) >= PARA_MIN_WORDS && !isAdOrMedia(el));
+    const notMetadata = (el) => !window.KaniProse || !window.KaniProse.looksLikeMetadata(el.innerText);
+    const semantic = collectSemanticBlocks(zoneEl).filter(el => wordCount(el.innerText) >= PARA_MIN_WORDS && !isAdOrMedia(el) && notMetadata(el));
     if (semantic.length >= 2) {
       const covered = semantic.reduce((sum, el) => sum + wordCount(el.innerText), 0);
       if (zoneWords > 0 && covered / zoneWords >= 0.70) {
@@ -755,13 +757,23 @@
       }
     }
 
+    // Text of a group, for prose-vs-metadata classification.
+    const groupText = (g) =>
+      g.segs.map(s => s.node.textContent.slice(s.start, s.end)).join(' ').replace(/\s+/g, ' ').trim();
+    const isMetadataLine = (g) =>
+      window.KaniProse ? window.KaniProse.looksLikeMetadata(groupText(g)) : false;
+
     // Fold single-line groups forward into the next multi-line group (or, if
-    // trailing, back into the previous), so a lone line never stands alone.
+    // trailing, back into the previous), so a lone line never stands alone —
+    // BUT first drop single lines that are feed/page chrome (author bylines,
+    // timestamps, reaction labels). Otherwise they fold into the first real
+    // paragraph and drag the zone box up over the header (e.g. LinkedIn posts).
     const merged = [];
     let pending = [];
     for (const g of groups) {
       if (g.heading) continue;            // titles/subheads aren't summarizable paragraphs
       if (g.lines <= 1) {
+        if (isMetadataLine(g)) continue;  // chrome, not prose → drop entirely
         pending = pending.concat(g.segs);
       } else {
         merged.push({ segs: pending.concat(g.segs) });

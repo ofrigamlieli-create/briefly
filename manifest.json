@@ -14,7 +14,7 @@
       "matches": ["<all_urls>"],
       "all_frames": false,
       "run_at": "document_idle",
-      "js": ["js/selection-detector.js", "js/selection-listener.js", "js/mock-tldr.js", "js/widget-shadow.js", "js/widget.js"]
+      "js": ["js/prose-classifier.js", "js/selection-detector.js", "js/selection-listener.js", "js/mock-tldr.js", "js/widget-shadow.js", "js/widget.js"]
     }
   ],
   "web_accessible_resources": [
