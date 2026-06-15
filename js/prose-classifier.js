@@ -20,7 +20,7 @@
 
   // Middot / pipe separators feeds use to pack byline fields onto one line:
   // "Name · 1st · Title · 5d".
-  const SEPARATORS = /[·•‧|│]| - /;
+  const SEPARATORS = /[·•‧|│]/;
 
   // Relative timestamps: "5d", "3h", "2 weeks ago", "1mo", "Just now".
   const RELATIVE_TIME =
@@ -45,10 +45,12 @@
 
   // Does the text read like a real sentence? Multiple words AND ends in
   // sentence punctuation somewhere. Used as a strong "this IS prose" override.
+  // A TRAILING ellipsis ("Builder | 15+ years…") is truncation, not a sentence
+  // end, so strip it before judging — otherwise headlines look like prose.
   function hasSentenceShape(text) {
-    const t = (text || '').trim();
+    const t = (text || '').trim().replace(/(\.{2,}|…)+\s*$/, '').trim();
     if (words(t).length < 5) return false;
-    return /[.!?…]["')\]]?\s*$/.test(t) || /[.!?]\s+[A-Z]/.test(t);
+    return /[.!?]["')\]]?\s*$/.test(t) || /[.!?]\s+[A-Z]/.test(t);
   }
 
   /**
@@ -71,12 +73,14 @@
     if (SOCIAL_LABEL.test(t)) return true;
     if (ENGAGEMENT_COUNT.test(t)) return true;
 
-    // Separator-packed byline: "Name · Title · 5d" — multiple short fields, no
-    // sentence punctuation. Require ≥1 separator and that no single field is a
-    // long clause (which would suggest real prose with an aside).
+    // Separator-packed byline / headline: "Name · Title · 5d",
+    // "Builder | 15+ years of Dev + PM". Multiple fields joined by middots/pipes
+    // with no sentence shape (already ruled out above) and a short total line is
+    // chrome, not article prose. We don't require every field to be tiny —
+    // professional headlines pack a long noun phrase into one field.
     if (SEPARATORS.test(t)) {
       const fields = t.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
-      if (fields.length >= 2 && fields.every(f => words(f).length <= 6)) return true;
+      if (fields.length >= 2) return true;
     }
 
     return false;

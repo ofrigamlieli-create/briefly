@@ -729,6 +729,17 @@
       for (let i = 0; i < txt.length; i++) if (txt[i] === '\n') flush(i);
       flush(txt.length);
     }
+
+    // Drop chrome lines (author bylines, headlines, timestamps, reaction labels)
+    // at the LINE level — before grouping — so they can never merge into an
+    // adjacent prose paragraph and drag its box up over the header.
+    if (window.KaniProse) {
+      for (let i = segs.length - 1; i >= 0; i--) {
+        const lineText = segs[i].node.textContent.slice(segs[i].start, segs[i].end);
+        if (window.KaniProse.looksLikeMetadata(lineText)) segs.splice(i, 1);
+      }
+    }
+
     if (!segs.length) return [];
 
     const lineH = median(allLineHeights) || 16;
