@@ -13,6 +13,13 @@
 // would be prose omission, which fails our quality bar just like content bleed.
 
 (function () {
+  // Build stamp — bump on every change so we can confirm the page is running the
+  // latest content script (reloading the extension does NOT update already-open
+  // tabs; the page must be refreshed). Open DevTools console and look for this.
+  const KANI_BUILD = 'smart-brain-v2 · build 5';
+  console.log('%c[Kani] ' + KANI_BUILD + ' loaded', 'color:#3d9da6;font-weight:600');
+  window.KANI_BUILD = KANI_BUILD;
+
   // --- tunables -------------------------------------------------------------
   // Above this many words a line is almost certainly real prose, so we never
   // treat it as metadata regardless of punctuation/separators.
