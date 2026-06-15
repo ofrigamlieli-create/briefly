@@ -1016,6 +1016,28 @@
       };
       const bounded = paragraphs.filter(within);
       if (bounded.length) paragraphs = bounded;
+
+      // Within a social post, the Like/Comment/Repost/Send (or Reply/React) row
+      // separates the post BODY from the reactions and comment thread below it.
+      // Find that action row below the selection and drop any paragraph at/below
+      // it, so the zone is the post body only — never the comments. This verb
+      // set is near-universal across social platforms.
+      const ACTION = /^(like|comment|repost|share|send|reply|react|upvote)$/i;
+      const ARIA_ACTION = /^(like|comment|repost|share|send|reply|react|upvote)\b/i;
+      const selTop = storedRange ? storedRange.getBoundingClientRect().top : -Infinity;
+      let cutTop = Infinity;
+      postEl.querySelectorAll('button,[role="button"]').forEach(b => {
+        const label = (b.innerText || '').trim();
+        const aria = (b.getAttribute('aria-label') || '').trim();
+        if (ACTION.test(label) || ARIA_ACTION.test(aria)) {
+          const r = b.getBoundingClientRect();
+          if (r.height > 0 && r.top > selTop && r.top < cutTop) cutTop = r.top;
+        }
+      });
+      if (cutTop !== Infinity) {
+        const above = paragraphs.filter(p => { const bb = p.getBounds(); return bb && bb.top < cutTop - 4; });
+        if (above.length) paragraphs = above;
+      }
     }
 
     // Zone = the area hugging just the detected paragraphs (so title, media,
