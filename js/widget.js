@@ -990,6 +990,26 @@
     // it geometrically by intersection with the media element's on-screen rect.
     paragraphs = rejectMediaOverlaps(paragraphs);
 
+    // Feed boundary: a content zone can span several stacked posts (the detector
+    // climbs to a container holding 1–2 posts). Bound the result to the single
+    // post the selection STARTED in by capping at its nearest semantic post
+    // wrapper (<article>/[role="article"] — used by X, Reddit, Facebook, and
+    // others for a self-contained post). Article pages have no such wrapper near
+    // the selection, so this is a no-op there.
+    const startNode = storedRange
+      ? (storedRange.startContainer.nodeType === 1 ? storedRange.startContainer : storedRange.startContainer.parentElement)
+      : null;
+    const postEl = startNode && startNode.closest ? startNode.closest('article,[role="article"]') : null;
+    if (postEl) {
+      const within = (p) => {
+        let c = p.range && p.range.commonAncestorContainer;
+        if (c && c.nodeType !== Node.ELEMENT_NODE) c = c.parentElement;
+        return !!c && postEl.contains(c);
+      };
+      const bounded = paragraphs.filter(within);
+      if (bounded.length) paragraphs = bounded;
+    }
+
     // Zone = the area hugging just the detected paragraphs (so title, media,
     // and tags fall outside), and its text = those paragraphs combined.
     // Uses the median of per-paragraph right edges so floated sidebars (e.g.

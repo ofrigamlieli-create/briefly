@@ -16,7 +16,7 @@
   // Build stamp — bump on every change so we can confirm the page is running the
   // latest content script (reloading the extension does NOT update already-open
   // tabs; the page must be refreshed). Open DevTools console and look for this.
-  const KANI_BUILD = 'smart-brain-v2 · build 6';
+  const KANI_BUILD = 'smart-brain-v2 · build 7';
   console.log('%c[Kani] ' + KANI_BUILD + ' loaded', 'color:#3d9da6;font-weight:600');
   window.KANI_BUILD = KANI_BUILD;
 
@@ -67,28 +67,27 @@
   function looksLikeMetadata(text) {
     const t = (text || '').trim();
     if (!t) return true;                       // empty/whitespace = not prose
-    const w = words(t);
 
-    // Long lines, or anything that reads like a real sentence, are prose.
-    if (w.length > METADATA_MAX_WORDS) return false;
+    // Anything that reads like a real sentence is prose — strongest override.
     if (hasSentenceShape(t)) return false;
 
-    // Strong, high-precision metadata signals (only reached for short, non-
-    // sentence lines).
-    if (RELATIVE_TIME.test(t)) return true;
-    if (CONNECTION_DEGREE.test(t)) return true;
-    if (SOCIAL_LABEL.test(t)) return true;
-    if (ENGAGEMENT_COUNT.test(t)) return true;
-
     // Separator-packed byline / headline: "Name · Title · 5d",
-    // "Builder | 15+ years of Dev + PM". Multiple fields joined by middots/pipes
-    // with no sentence shape (already ruled out above) and a short total line is
-    // chrome, not article prose. We don't require every field to be tiny —
-    // professional headlines pack a long noun phrase into one field.
+    // "Builder | 15+ years of Dev + PM | Co-founder & CTO @ Stealth". Multiple
+    // fields joined by middots/pipes with no sentence shape is chrome. NOT
+    // subject to the short-line cap below — professional headlines run long
+    // (this is what made an untruncated 17-word LinkedIn headline slip through).
     if (SEPARATORS.test(t)) {
       const fields = t.split(SEPARATORS).map(s => s.trim()).filter(Boolean);
       if (fields.length >= 2) return true;
     }
+
+    // Remaining (weaker) signals only apply to short, non-sentence lines, so a
+    // long paragraph that merely contains a number/label stays prose.
+    if (words(t).length > METADATA_MAX_WORDS) return false;
+    if (RELATIVE_TIME.test(t)) return true;
+    if (CONNECTION_DEGREE.test(t)) return true;
+    if (SOCIAL_LABEL.test(t)) return true;
+    if (ENGAGEMENT_COUNT.test(t)) return true;
 
     return false;
   }
