@@ -1038,7 +1038,11 @@
         const above = paragraphs.filter(p => { const bb = p.getBounds(); return bb && bb.top < cutTop - 4; });
         if (above.length) paragraphs = above;
       }
+      console.log('[Kani dbg] postEl=', postEl.tagName + '/role=' + (postEl.getAttribute('role') || '-') +
+        ' h=' + Math.round(postEl.getBoundingClientRect().height), 'cutTop=', cutTop);
     }
+    console.log('[Kani dbg] paragraphs(' + paragraphs.length + '):',
+      paragraphs.map(p => (p.text || '').replace(/\s+/g, ' ').slice(0, 30)));
 
     // Zone = the area hugging just the detected paragraphs (so title, media,
     // and tags fall outside), and its text = those paragraphs combined.
