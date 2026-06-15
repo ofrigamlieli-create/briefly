@@ -796,17 +796,35 @@
       else merged.push({ segs: pending });   // whole zone was single lines → one block
     }
 
-    // Build a range per merged group.
+    // Build each paragraph from its own kept prose segments. Crucially, the box
+    // is the union of the PER-SEGMENT rects (each confined to one line of prose),
+    // NOT a range spanning first→last — a spanning range's getClientRects() would
+    // also cover anything wedged between the lines (links, timestamps, action
+    // bars, the next post), bleeding the box past the prose. Text still comes
+    // from the full first→last range so wording reads naturally.
     const result = [];
     for (const g of merged) {
       const first = g.segs[0];
       const last = g.segs[g.segs.length - 1];
-      const range = document.createRange();
-      range.setStart(first.node, first.start);
-      range.setEnd(last.node, last.end);
-      const text = range.toString().trim();
+      const textRange = document.createRange();
+      textRange.setStart(first.node, first.start);
+      textRange.setEnd(last.node, last.end);
+      const text = textRange.toString().trim();
       if (wordCount(text) < PARA_MIN_WORDS) continue;
-      result.push({ range, text, getBounds: () => getUnionRect(range.getClientRects()) });
+      const segs = g.segs;
+      const getBounds = () => {
+        const rects = [];
+        for (const s of segs) {
+          const r = document.createRange();
+          r.setStart(s.node, s.start);
+          r.setEnd(s.node, s.end);
+          for (const rect of r.getClientRects()) {
+            if (rect.width > 0 && rect.height > 0) rects.push(rect);
+          }
+        }
+        return getUnionRect(rects);
+      };
+      result.push({ range: textRange, text, getBounds });
     }
     return result;
   }
