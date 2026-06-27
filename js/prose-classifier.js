@@ -16,7 +16,7 @@
   // Build stamp — bump on every change so we can confirm the page is running the
   // latest content script (reloading the extension does NOT update already-open
   // tabs; the page must be refreshed). Open DevTools console and look for this.
-  const KANI_BUILD = 'smart-brain-v2 · build 10';
+  const KANI_BUILD = 'smart-brain-v2 · build 18';
   console.log('%c[Kani] ' + KANI_BUILD + ' loaded', 'color:#3d9da6;font-weight:600');
   window.KANI_BUILD = KANI_BUILD;
 
@@ -39,6 +39,13 @@
   // Standalone social/UI labels that are never article prose.
   const SOCIAL_LABEL =
     /^\s*(promoted|sponsored|premium|featured|follow|following|connect|connected|like|liked|comment|comments|repost|reposted|share|shared|send|save|saved|see more|see translation|show more|read more|sort by|suggested|recommended|trending|who'?s viewed|people also viewed)\b/i;
+
+  // Feed "context" headers that announce someone else's activity above a post:
+  // "Eli Barenboim commented on this", "Dana Cohen reposted this". The verb is
+  // mid-line (after a name), so this is unanchored — unlike SOCIAL_LABEL. A real
+  // sentence using these verbs ends in punctuation and is caught as prose above.
+  const SOCIAL_CONTEXT =
+    /\b(commented|reposted|shared this|liked this|loves this|celebrates this|replied|reacted|started following)\b/i;
 
   // Pure engagement counts: "129", "1.2K", "28 comments", "5 reactions".
   const ENGAGEMENT_COUNT =
@@ -87,7 +94,16 @@
     if (RELATIVE_TIME.test(t)) return true;
     if (CONNECTION_DEGREE.test(t)) return true;
     if (SOCIAL_LABEL.test(t)) return true;
+    if (SOCIAL_CONTEXT.test(t)) return true;
     if (ENGAGEMENT_COUNT.test(t)) return true;
+    // Reaction-summary line: "Sapir Gorenstein and 23 others".
+    if (/\b\d+\s+others?\b/i.test(t)) return true;
+
+    // Comma-packed role/title byline with no sentence shape:
+    // "Husband, Father, Grandfather, Author and Venture Capitalist". Real short
+    // sentences rarely carry 3+ comma fields without ending punctuation — and any
+    // that read as a sentence already returned as prose via hasSentenceShape.
+    if (t.split(',').filter(s => s.trim()).length >= 3) return true;
 
     return false;
   }

@@ -517,20 +517,33 @@
   function updateExpandOverlayPositions() {
     const sx = window.scrollX, sy = window.scrollY;
     const headerBottom = getOverlayClipLine();
-    expandOverlayItems.forEach(({ overlay, getBounds }) => {
-      let r = null;
-      try { r = getBounds(); } catch (_) { r = null; }
-      if (!r || r.height === 0) { overlay.style.display = 'none'; return; }
-      // Fully above the clip line → hide entirely.
-      if (r.bottom <= headerBottom) { overlay.style.display = 'none'; return; }
-      overlay.style.display = 'block';
-      overlay.style.top    = (r.top  + sy - expandContainerDocTop)  + 'px';
-      overlay.style.left   = (r.left + sx - expandContainerDocLeft) + 'px';
-      overlay.style.width  = r.width  + 'px';
-      overlay.style.height = r.height + 'px';
-      // Clip the slice that would render above the bar (measured from box top).
-      const clipTop = Math.max(0, headerBottom - r.top);
-      overlay.style.clipPath = clipTop > 0 ? `inset(${clipTop}px 0 0 0)` : 'none';
+    expandOverlayItems.forEach((item) => {
+      // Chip — keeps its intrinsic size; only its position follows the prose,
+      // anchored just below the last marked paragraph.
+      if (item.isChip) {
+        let r = null;
+        try { r = item.getBounds(); } catch (_) { r = null; }
+        if (!r || !r.height || (r.top + r.height) <= headerBottom) { item.overlay.style.display = 'none'; return; }
+        item.overlay.style.display = 'flex';
+        item.overlay.style.top  = (r.top + r.height + sy - expandContainerDocTop + 8) + 'px';
+        item.overlay.style.left = (r.left + sx - expandContainerDocLeft) + 'px';
+        return;
+      }
+      // Paragraph — recompute its line rects once, then place each line div so
+      // the marks track the text as it scrolls (and never paint the gaps).
+      let rects = [];
+      try { rects = item.getRects() || []; } catch (_) { rects = []; }
+      item.overlays.forEach((ov, i) => {
+        const r = rects[i];
+        if (!r || r.height === 0 || r.bottom <= headerBottom) { ov.style.display = 'none'; return; }
+        ov.style.display = 'block';
+        ov.style.top    = (r.top  + sy - expandContainerDocTop)  + 'px';
+        ov.style.left   = (r.left + sx - expandContainerDocLeft) + 'px';
+        ov.style.width  = r.width  + 'px';
+        ov.style.height = r.height + 'px';
+        const clipTop = Math.max(0, headerBottom - r.top);
+        ov.style.clipPath = clipTop > 0 ? `inset(${clipTop}px 0 0 0)` : 'none';
+      });
     });
   }
 
@@ -642,7 +655,7 @@
   // Reads what's actually drawn on screen (per-line rects) instead of trusting
   // <p> tags or <br> patterns, so it works on articles AND social feeds.
   // Returns [{ range, text, getBounds }].
-  function findParagraphs(zoneEl) {
+  function findParagraphs(zoneEl, anchorTop) {
     const zoneWords = wordCount(zoneEl.innerText || zoneEl.textContent);
 
     // 1. Semantic fast-path — only when clean elements cover most of the zone.
@@ -651,22 +664,31 @@
     if (semantic.length >= 2) {
       const covered = semantic.reduce((sum, el) => sum + wordCount(el.innerText), 0);
       if (zoneWords > 0 && covered / zoneWords >= 0.70) {
+        console.log('[Kani dbg] PATH=semantic  blocks=' + semantic.length);
         return semantic.map(el => {
           const range = document.createRange();
           range.selectNodeContents(el);
-          return { range, text: (el.innerText || '').trim(), getBounds: () => getUnionRect(range.getClientRects()) };
+          return {
+            range, text: (el.innerText || '').trim(),
+            getRects: () => Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0),
+            getBounds: () => getUnionRect(range.getClientRects())
+          };
         });
       }
     }
 
     // 2. Visual-gap engine.
-    const groups = groupByVisualGap(zoneEl);
+    const groups = groupByVisualGap(zoneEl, anchorTop);
     if (groups.length) return groups;
 
     // 3. Last resort: whole zone as one paragraph.
     const range = document.createRange();
     range.selectNodeContents(zoneEl);
-    return [{ range, text: (zoneEl.innerText || '').trim(), getBounds: () => getUnionRect(range.getClientRects()) }];
+    return [{
+      range, text: (zoneEl.innerText || '').trim(),
+      getRects: () => Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0),
+      getBounds: () => getUnionRect(range.getClientRects())
+    }];
   }
 
   // p / blockquote plus top-level lists (a list is one block).
@@ -688,7 +710,7 @@
   // node with \n line breaks), then cut a new paragraph at a blank vertical
   // gap, a left-indent jump, or a heading. Finally fold lone single lines
   // into a neighbour so we never draw a box around one bare line.
-  function groupByVisualGap(zoneEl) {
+  function groupByVisualGap(zoneEl, anchorTop) {
     const excludeSel = (window.KaniSelectionDetector && window.KaniSelectionDetector.HARD_EXCLUDED_SELECTOR) ||
       'header,footer,nav,aside,button,input,select,textarea';
     const walker = document.createTreeWalker(zoneEl, NodeFilter.SHOW_TEXT, {
@@ -730,9 +752,14 @@
       flush(txt.length);
     }
 
-    // Drop chrome lines (author bylines, headlines, timestamps, reaction labels)
-    // at the LINE level — before grouping — so they can never merge into an
-    // adjacent prose paragraph and drag its box up over the header.
+    // Drop individual chrome lines (author bylines with a connection degree,
+    // timestamps, engagement counts, "and N others") BEFORE grouping, using the
+    // shared classifier. Without this, a chrome line flush against the body gets
+    // swept into the body's block and — now that we draw per line — picks up a
+    // highlighter mark. This only removes lines the classifier is confident about;
+    // shapeless chrome (bios, "Voices worth following" headers) is left to the
+    // group-level wall logic and the summary-time backstop. Headings stay so they
+    // can still act as walls.
     if (window.KaniProse) {
       for (let i = segs.length - 1; i >= 0; i--) {
         const lineText = segs[i].node.textContent.slice(segs[i].start, segs[i].end);
@@ -774,27 +801,51 @@
     const isMetadataLine = (g) =>
       window.KaniProse ? window.KaniProse.looksLikeMetadata(groupText(g)) : false;
 
-    // Fold single-line groups forward into the next multi-line group (or, if
-    // trailing, back into the previous), so a lone line never stands alone —
-    // BUT first drop single lines that are feed/page chrome (author bylines,
-    // timestamps, reaction labels). Otherwise they fold into the first real
-    // paragraph and drag the zone box up over the header (e.g. LinkedIn posts).
-    const merged = [];
-    let pending = [];
-    for (const g of groups) {
-      if (g.heading) continue;            // titles/subheads aren't summarizable paragraphs
-      if (g.lines <= 1) {
-        if (isMetadataLine(g)) continue;  // chrome, not prose → drop entirely
-        pending = pending.concat(g.segs);
-      } else {
-        merged.push({ segs: pending.concat(g.segs) });
-        pending = [];
+    // --- Anchor-based contiguous prose run --------------------------------
+    // Mark each group prose-vs-chrome, then grow OUT from the group nearest the
+    // user's selection through touching prose groups only, stopping at the first
+    // chrome/heading group or a large vertical gap (e.g. a removed action bar or
+    // spacer). This keeps bylines/bios/timestamps above and reactions/comments
+    // below OUT of the box without needing to perfectly classify every one of
+    // them — a single chrome line between the body and the noise is wall enough.
+    groups.forEach(g => {
+      g.top = Math.min(...g.segs.map(s => s.top));
+      g.isMeta = g.heading || isMetadataLine(g);
+    });
+    const BIG_GAP = 2.5 * lineH;
+    let anchor = -1, best = Infinity;
+    if (anchorTop != null) {
+      groups.forEach((g, i) => {
+        if (g.isMeta) return;
+        const d = (anchorTop >= g.top && anchorTop <= g.bottom)
+          ? 0 : Math.min(Math.abs(anchorTop - g.top), Math.abs(anchorTop - g.bottom));
+        if (d < best) { best = d; anchor = i; }
+      });
+    }
+    let lo, hi;
+    if (anchor === -1) {                    // no usable anchor → keep all prose
+      lo = 0; hi = groups.length - 1;
+    } else {
+      lo = hi = anchor;
+      for (let i = anchor - 1; i >= 0; i--) {          // grow upward
+        if (groups[i].isMeta) break;
+        if (groups[i + 1].top - groups[i].bottom > BIG_GAP) break;
+        lo = i;
+      }
+      for (let i = anchor + 1; i < groups.length; i++) { // grow downward
+        if (groups[i].isMeta) break;
+        if (groups[i].top - groups[i - 1].bottom > BIG_GAP) break;
+        hi = i;
       }
     }
-    if (pending.length) {
-      if (merged.length) merged[merged.length - 1].segs.push(...pending);
-      else merged.push({ segs: pending });   // whole zone was single lines → one block
-    }
+    console.log('[Kani dbg] PATH=visualgap  anchorTop=' + (anchorTop == null ? 'null' : Math.round(anchorTop)) +
+      ' anchor=' + anchor + ' lo/hi=' + lo + '/' + hi + ' of ' + groups.length + ' groups');
+    console.log('[Kani dbg] groups:', groups.map((g, i) =>
+      (i === anchor ? '>' : ' ') + (g.isMeta ? 'META ' : 'prose') + ' @' + Math.round(g.top) + ' "' + groupText(g).slice(0, 22) + '"'));
+
+    const merged = groups.slice(lo, hi + 1)
+      .filter(g => !g.isMeta && !g.heading)
+      .map(g => ({ segs: g.segs }));
 
     // Build each paragraph from its own kept prose segments. Crucially, the box
     // is the union of the PER-SEGMENT rects (each confined to one line of prose),
@@ -812,7 +863,7 @@
       const text = textRange.toString().trim();
       if (wordCount(text) < PARA_MIN_WORDS) continue;
       const segs = g.segs;
-      const getBounds = () => {
+      const getRects = () => {
         const rects = [];
         for (const s of segs) {
           const r = document.createRange();
@@ -822,9 +873,10 @@
             if (rect.width > 0 && rect.height > 0) rects.push(rect);
           }
         }
-        return getUnionRect(rects);
+        return rects;
       };
-      result.push({ range: textRange, text, getBounds });
+      const getBounds = () => getUnionRect(getRects());
+      result.push({ range: textRange, text, getRects, getBounds });
     }
     return result;
   }
@@ -873,51 +925,58 @@
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
   }
 
-  function createExpandOverlay(rect, isZone, scrollContainer, onClick) {
+  // A per-paragraph "highlighter" mark. It hugs the prose lines (rect = union of
+  // that paragraph's per-line rects), so it can NEVER paint over the gaps between
+  // paragraphs — no more green over an ad, reaction bar, or the next post. There
+  // is deliberately no big zone rectangle anymore; the whole-post action lives in
+  // the chip below (createChip).
+  function createExpandOverlay(rect, scrollContainer, onClick) {
     const el = document.createElement('div');
     el.style.cssText = [
       'position:absolute',
-      'border-radius:3px',
+      'border-radius:2px',
       'box-sizing:border-box',
       `top:${rect.top + window.scrollY - expandContainerDocTop}px`,
       `left:${rect.left + window.scrollX - expandContainerDocLeft}px`,
       `width:${rect.width}px`,
       `height:${rect.height}px`,
-      isZone
-        ? 'pointer-events:all;cursor:pointer;background:rgba(46,160,110,0.10);border:2px solid rgba(46,160,110,0.45);z-index:2147483640;'
-        : 'pointer-events:all;cursor:pointer;background:rgba(32,120,90,0.30);border:1px solid rgba(32,120,90,0.45);z-index:2147483641;'
+      'pointer-events:all;cursor:pointer;background:rgba(46,160,110,0.20);z-index:2147483641;'
     ].join(';');
 
-    if (isZone) {
-      el.addEventListener('mouseenter', () => {
-        el.style.background = 'rgba(46,160,110,0.20)';
-        el.style.borderColor = 'rgba(46,160,110,0.75)';
-      });
-      el.addEventListener('mouseleave', () => {
-        el.style.background = 'rgba(46,160,110,0.10)';
-        el.style.borderColor = 'rgba(46,160,110,0.45)';
-      });
-      el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
-    } else {
-      el.addEventListener('mouseenter', () => {
-        el.style.background = 'rgba(32,120,90,0.50)';
-        el.style.borderColor = 'rgba(32,120,90,0.70)';
-      });
-      el.addEventListener('mouseleave', () => {
-        el.style.background = 'rgba(32,120,90,0.30)';
-        el.style.borderColor = 'rgba(32,120,90,0.45)';
-      });
-      el.addEventListener('wheel', (e) => {
-        if (scrollContainer) {
-          scrollContainer.scrollTop += e.deltaY;
-          scrollContainer.scrollLeft += e.deltaX;
-        } else {
-          window.scrollBy(e.deltaX, e.deltaY);
-        }
-      }, { passive: true });
-      el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
-    }
+    el.addEventListener('mouseenter', () => { el.style.background = 'rgba(46,160,110,0.34)'; });
+    el.addEventListener('mouseleave', () => { el.style.background = 'rgba(46,160,110,0.20)'; });
+    el.addEventListener('wheel', (e) => {
+      if (scrollContainer) {
+        scrollContainer.scrollTop += e.deltaY;
+        scrollContainer.scrollLeft += e.deltaX;
+      } else {
+        window.scrollBy(e.deltaX, e.deltaY);
+      }
+    }, { passive: true });
+    el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
 
+    return el;
+  }
+
+  // The single "Summarize" chip — the one action affordance for the whole post,
+  // replacing the old big clickable rectangle. The sync loop anchors it just
+  // below the prose. Solid pill + own font so it reads on any page background.
+  function createChip(count, onClick) {
+    const el = document.createElement('div');
+    el.style.cssText = [
+      'position:absolute',
+      'pointer-events:all;cursor:pointer',
+      'display:flex;align-items:center;gap:6px',
+      'font:500 13px/1 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif',
+      'color:#ffffff;background:#2ea06e',
+      'padding:6px 12px;border-radius:999px',
+      'box-shadow:0 1px 4px rgba(0,0,0,0.18)',
+      'white-space:nowrap;z-index:2147483642;'
+    ].join(';');
+    el.textContent = count > 1 ? ('Summarize · ' + count + ' paragraphs') : 'Summarize';
+    el.addEventListener('mouseenter', () => { el.style.background = '#278a5e'; });
+    el.addEventListener('mouseleave', () => { el.style.background = '#2ea06e'; });
+    el.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
     return el;
   }
 
@@ -960,6 +1019,11 @@
     // a multi-paragraph selection resolves the zone to the article-body div, but
     // the standfirst/intro lives in a sibling container above it, so seeding lets
     // the section walk climb high enough to include it (e.g. Goal, Wikipedia).
+    // Vertical position of the user's selection — the anchor the prose run grows
+    // out from, so the box is centred on what they actually selected.
+    const __selRect = storedRange ? storedRange.getBoundingClientRect() : null;
+    const anchorTop = __selRect && __selRect.height ? __selRect.top : null;
+
     let paragraphs;
     let seedP = null;
     if (zoneEl.tagName?.toLowerCase() === 'p') {
@@ -974,15 +1038,20 @@
     }
     if (seedP) {
       const siblings = getSectionSiblings(seedP);
+      console.log('[Kani dbg] PATH=seedP/siblings  seedP=' + (seedP.tagName||'') + ' siblings=' + siblings.length);
       if (siblings.length >= 2) {
         paragraphs = siblings.map(el => {
           const r = document.createRange();
           r.selectNodeContents(el);
-          return { range: r, text: (el.innerText || '').trim(), getBounds: () => getUnionRect(Array.from(r.getClientRects())) };
+          return {
+            range: r, text: (el.innerText || '').trim(),
+            getRects: () => Array.from(r.getClientRects()).filter(rc => rc.width > 0 && rc.height > 0),
+            getBounds: () => getUnionRect(Array.from(r.getClientRects()))
+          };
         });
       }
     }
-    if (!paragraphs) paragraphs = findParagraphs(zoneEl);
+    if (!paragraphs) paragraphs = findParagraphs(zoneEl, anchorTop);
 
     // Drop any paragraph whose box overlaps an embedded video/iframe (e.g. a
     // video's overlaid caption text on Goal). Text-node detection can't tell a
@@ -1038,6 +1107,35 @@
         const above = paragraphs.filter(p => { const bb = p.getBounds(); return bb && bb.top < cutTop - 4; });
         if (above.length) paragraphs = above;
       }
+
+      // Header cut: a post's byline cluster — avatar, author name, bio,
+      // "X likes this", "Visit my website" — sits either BESIDE the avatar
+      // (indented to its right) or ABOVE it, while the body runs full-width
+      // below. Find the post avatar (a small, roughly-square image at/above the
+      // selection) and drop any paragraph above the selection that is indented
+      // past the avatar or sits above it. No avatar (most article pages) → no
+      // cut, so articles are untouched. Purely positional — no phrase matching.
+      let avatar = null;
+      postEl.querySelectorAll('img').forEach(im => {
+        const r = im.getBoundingClientRect();
+        if (r.width < 16 || r.width > 96 || r.height < 16 || r.height > 96) return;
+        if (r.width / r.height < 0.6 || r.width / r.height > 1.7) return;   // square-ish = avatar
+        if (r.top > selTop) return;                                          // header region only
+        if (!avatar || r.bottom > avatar.bottom) avatar = r;                 // actor avatar nearest the body
+      });
+      if (avatar) {
+        const bylineLeft = avatar.left + avatar.width - 2;
+        const body = paragraphs.filter(p => {
+          const bb = p.getBounds();
+          if (!bb) return false;
+          if (bb.top >= selTop - 2) return true;                            // never drop at/below the selection
+          if (bb.left >= bylineLeft) return false;                          // indented beside avatar = byline field
+          if (bb.top + bb.height <= avatar.top + 2) return false;           // sits above avatar = context header
+          return true;
+        });
+        if (body.length) paragraphs = body;
+        console.log('[Kani dbg] header-cut avatar@' + Math.round(avatar.top) + ' bylineLeft=' + Math.round(bylineLeft) + ' kept=' + paragraphs.length);
+      }
       console.log('[Kani dbg] postEl=', postEl.tagName + '/role=' + (postEl.getAttribute('role') || '-') +
         ' h=' + Math.round(postEl.getBoundingClientRect().height), 'cutTop=', cutTop);
     }
@@ -1060,27 +1158,39 @@
       return { top, left, width: right - left, height: bottom - top };
     };
     const zoneText = paragraphs.map(p => p.text).join('\n\n') || zoneEl.innerText || '';
-    const zoneRect = zoneBounds();
-    if (zoneRect) {
-      const zoneOverlay = createExpandOverlay(zoneRect, true, scrollContainer, () => {
+
+    // Highlighter marks, drawn ONE PER LINE rect (never the union bounding box)
+    // so the green hugs the text and never fills the blank gaps between lines or
+    // paragraphs. Each paragraph is one item holding its line divs; the sync loop
+    // recomputes that paragraph's line rects once per frame. Click any line of a
+    // paragraph → summarize that whole paragraph.
+    const lineRectsOf = (p) =>
+      (p.getRects ? p.getRects() : [p.getBounds()]).filter(r => r && r.width > 0 && r.height > 0);
+    let drawn = 0;
+    paragraphs.forEach((p) => {
+      if (!p.text.trim()) return;
+      const rects = lineRectsOf(p);
+      if (!rects.length) return;
+      const onClick = () => { removeExpandOverlays(); showPicker(p.text, p.getBounds()); };
+      const overlays = rects.map((rect) => {
+        const mark = createExpandOverlay(rect, scrollContainer, onClick);
+        expandOverlayContainer.appendChild(mark);
+        return mark;
+      });
+      expandOverlayItems.push({ overlays, getRects: () => lineRectsOf(p) });
+      drawn++;
+    });
+
+    // One "Summarize" chip for the whole post — no big rectangle, so nothing is
+    // ever drawn over the gaps. Anchored under the prose by the sync loop.
+    if (drawn && zoneBounds()) {
+      const chip = createChip(drawn, () => {
         removeExpandOverlays();
         showPicker(zoneText, zoneBounds());
       });
-      expandOverlayContainer.appendChild(zoneOverlay);
-      expandOverlayItems.push({ overlay: zoneOverlay, getBounds: zoneBounds });
+      expandOverlayContainer.appendChild(chip);
+      expandOverlayItems.push({ overlay: chip, getBounds: zoneBounds, isChip: true });
     }
-
-    paragraphs.forEach(({ text, getBounds }) => {
-      const pRect = getBounds();
-      if (!pRect || pRect.height === 0 || pRect.width === 0) return;
-      if (!text.trim()) return;
-      const pOverlay = createExpandOverlay(pRect, false, scrollContainer, () => {
-        removeExpandOverlays();
-        showPicker(text, getBounds());
-      });
-      expandOverlayContainer.appendChild(pOverlay);
-      expandOverlayItems.push({ overlay: pOverlay, getBounds });
-    });
 
     startExpandSyncLoop();
 
@@ -1327,13 +1437,12 @@
   // ── Init ─────────────────────────────────────────────────────
 
   function init() {
-    if (!document.querySelector('link[data-kani-fonts]')) {
-      const fontLink = document.createElement('link');
-      fontLink.rel = 'stylesheet';
-      fontLink.href = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap';
-      fontLink.dataset.kaniFonts = 'true';
-      document.head.appendChild(fontLink);
-    }
+    // Fonts: rely on the system font stack declared in widget.css. We do NOT
+    // inject an external Google Fonts <link> — strict sites (LinkedIn, GitHub,
+    // many news sites) block it via Content Security Policy, which logs a console
+    // error, and loading it would ping Google from every page the user visits.
+    // To restore the exact branded font later, bundle the woff2 locally and
+    // @font-face it from a web_accessible_resource inside the shadow DOM.
 
     const trigger = window.KaniWidgetShadow.create();
     triggerHostEl = trigger.hostEl;
