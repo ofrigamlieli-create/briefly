@@ -15,9 +15,8 @@
 (function () {
   // Build stamp — bump on every change so we can confirm the page is running the
   // latest content script (reloading the extension does NOT update already-open
-  // tabs; the page must be refreshed). Open DevTools console and look for this.
-  const KANI_BUILD = 'smart-brain-v2 · build 18';
-  console.log('%c[Kani] ' + KANI_BUILD + ' loaded', 'color:#3d9da6;font-weight:600');
+  // tabs; the page must be refreshed). Check window.KANI_BUILD in DevTools.
+  const KANI_BUILD = 'smart-brain-v2 · build 19';
   window.KANI_BUILD = KANI_BUILD;
 
   // --- tunables -------------------------------------------------------------

@@ -664,7 +664,6 @@
     if (semantic.length >= 2) {
       const covered = semantic.reduce((sum, el) => sum + wordCount(el.innerText), 0);
       if (zoneWords > 0 && covered / zoneWords >= 0.70) {
-        console.log('[Kani dbg] PATH=semantic  blocks=' + semantic.length);
         return semantic.map(el => {
           const range = document.createRange();
           range.selectNodeContents(el);
@@ -838,11 +837,6 @@
         hi = i;
       }
     }
-    console.log('[Kani dbg] PATH=visualgap  anchorTop=' + (anchorTop == null ? 'null' : Math.round(anchorTop)) +
-      ' anchor=' + anchor + ' lo/hi=' + lo + '/' + hi + ' of ' + groups.length + ' groups');
-    console.log('[Kani dbg] groups:', groups.map((g, i) =>
-      (i === anchor ? '>' : ' ') + (g.isMeta ? 'META ' : 'prose') + ' @' + Math.round(g.top) + ' "' + groupText(g).slice(0, 22) + '"'));
-
     const merged = groups.slice(lo, hi + 1)
       .filter(g => !g.isMeta && !g.heading)
       .map(g => ({ segs: g.segs }));
@@ -1038,7 +1032,6 @@
     }
     if (seedP) {
       const siblings = getSectionSiblings(seedP);
-      console.log('[Kani dbg] PATH=seedP/siblings  seedP=' + (seedP.tagName||'') + ' siblings=' + siblings.length);
       if (siblings.length >= 2) {
         paragraphs = siblings.map(el => {
           const r = document.createRange();
@@ -1134,13 +1127,8 @@
           return true;
         });
         if (body.length) paragraphs = body;
-        console.log('[Kani dbg] header-cut avatar@' + Math.round(avatar.top) + ' bylineLeft=' + Math.round(bylineLeft) + ' kept=' + paragraphs.length);
       }
-      console.log('[Kani dbg] postEl=', postEl.tagName + '/role=' + (postEl.getAttribute('role') || '-') +
-        ' h=' + Math.round(postEl.getBoundingClientRect().height), 'cutTop=', cutTop);
     }
-    console.log('[Kani dbg] paragraphs(' + paragraphs.length + '):',
-      paragraphs.map(p => (p.text || '').replace(/\s+/g, ' ').slice(0, 30)));
 
     // Zone = the area hugging just the detected paragraphs (so title, media,
     // and tags fall outside), and its text = those paragraphs combined.
