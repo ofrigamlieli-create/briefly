@@ -565,6 +565,32 @@
     return null;
   }
 
+  // getClientRects() returns one rect per inline fragment (text run, link, <b>…),
+  // so link-dense lines get stacked overlapping marks that render darker than the
+  // rest. Merge every fragment on the same visual line into one spanning rect.
+  function mergeLineRects(rects) {
+    const sorted = Array.from(rects)
+      .filter(r => r.width > 0 && r.height > 0)
+      .sort((a, b) => (a.top - b.top) || (a.left - b.left));
+    const lines = [];
+    for (const r of sorted) {
+      const line = lines[lines.length - 1];
+      // Same line = vertical centers overlap the previous line's band.
+      if (line && (r.top + r.height / 2) < line.bottom && (r.bottom - r.height / 2) > line.top) {
+        line.left = Math.min(line.left, r.left);
+        line.right = Math.max(line.right, r.right);
+        line.top = Math.min(line.top, r.top);
+        line.bottom = Math.max(line.bottom, r.bottom);
+      } else {
+        lines.push({ left: r.left, right: r.right, top: r.top, bottom: r.bottom });
+      }
+    }
+    return lines.map(l => ({
+      left: l.left, top: l.top, right: l.right, bottom: l.bottom,
+      width: l.right - l.left, height: l.bottom - l.top
+    }));
+  }
+
   function getUnionRect(rectList) {
     const rects = Array.from(rectList).filter(r => r.width > 0 && r.height > 0);
     if (!rects.length) return null;
@@ -669,7 +695,7 @@
           range.selectNodeContents(el);
           return {
             range, text: (el.innerText || '').trim(),
-            getRects: () => Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0),
+            getRects: () => mergeLineRects(range.getClientRects()),
             getBounds: () => getUnionRect(range.getClientRects())
           };
         });
@@ -685,7 +711,7 @@
     range.selectNodeContents(zoneEl);
     return [{
       range, text: (zoneEl.innerText || '').trim(),
-      getRects: () => Array.from(range.getClientRects()).filter(r => r.width > 0 && r.height > 0),
+      getRects: () => mergeLineRects(range.getClientRects()),
       getBounds: () => getUnionRect(range.getClientRects())
     }];
   }
@@ -867,7 +893,7 @@
             if (rect.width > 0 && rect.height > 0) rects.push(rect);
           }
         }
-        return rects;
+        return mergeLineRects(rects);
       };
       const getBounds = () => getUnionRect(getRects());
       result.push({ range: textRange, text, getRects, getBounds });
@@ -1038,7 +1064,7 @@
           r.selectNodeContents(el);
           return {
             range: r, text: (el.innerText || '').trim(),
-            getRects: () => Array.from(r.getClientRects()).filter(rc => rc.width > 0 && rc.height > 0),
+            getRects: () => mergeLineRects(r.getClientRects()),
             getBounds: () => getUnionRect(Array.from(r.getClientRects()))
           };
         });
