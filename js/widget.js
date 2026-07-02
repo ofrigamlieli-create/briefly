@@ -573,10 +573,16 @@
       .filter(r => r.width > 0 && r.height > 0)
       .sort((a, b) => (a.top - b.top) || (a.left - b.left));
     const lines = [];
+    let lastRaw = null;
     for (const r of sorted) {
       const line = lines[lines.length - 1];
-      // Same line = vertical centers overlap the previous line's band.
-      if (line && (r.top + r.height / 2) < line.bottom && (r.bottom - r.height / 2) > line.top) {
+      // Same line = vertical center overlaps the PREVIOUS RAW rect's own band
+      // (not the accumulated merged box — else tightly-spaced lines with no
+      // paragraph gap chain-merge into one giant block, since a growing merged
+      // bottom keeps swallowing the next line too).
+      const sameLine = line && lastRaw &&
+        (r.top + r.height / 2) < lastRaw.bottom && (r.bottom - r.height / 2) > lastRaw.top;
+      if (sameLine) {
         line.left = Math.min(line.left, r.left);
         line.right = Math.max(line.right, r.right);
         line.top = Math.min(line.top, r.top);
@@ -584,6 +590,7 @@
       } else {
         lines.push({ left: r.left, right: r.right, top: r.top, bottom: r.bottom });
       }
+      lastRaw = r;
     }
     return lines.map(l => ({
       left: l.left, top: l.top, right: l.right, bottom: l.bottom,
